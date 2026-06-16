@@ -31,12 +31,17 @@ class CoeffNet(nn.Module):
                      ``p_ring``, initialized at ``p = 2`` (an ordinary torus), so
                      training starts from the exact paper model and can only
                      specialize away from it.
+        p_max:       optional cap on the squareness exponent (e.g. ``6``) for
+                     training stability; see :func:`pat.core.raw_to_p`.  ``None``
+                     (default) keeps the original unbounded ``p``, so older
+                     checkpoints reconstruct identically from their saved config.
     """
 
     def __init__(self, d_embed=128, n_layers=8, n_heads=8, d_ff=512,
-                 supertoroid=False, dropout=0.0):
+                 supertoroid=False, dropout=0.0, p_max=None):
         super().__init__()
         self.supertoroid = supertoroid
+        self.p_max = p_max
         self.embed = nn.Linear(6, d_embed)
         layer = nn.TransformerEncoderLayer(
             d_model=d_embed, nhead=n_heads, dim_feedforward=d_ff,
@@ -85,7 +90,7 @@ class CoeffNet(nn.Module):
         coeffs = rescale_coeffs(a_raw, sigma)
         sq = None
         if self.supertoroid:
-            sq = core.raw_to_p(out[:, 6:8])          # (B,2) -> p >= 1
+            sq = core.raw_to_p(out[:, 6:8], p_max=self.p_max)   # (B,2) -> p in [1, p_max]
         return coeffs, sigma, sq
 
 

@@ -238,14 +238,29 @@ def g_supertoroid(x, params, p_tube, p_ring):
 # --------------------------------------------------------------------------- #
 #  Squareness parameterization: raw network output  ->  exponent p >= 1
 # --------------------------------------------------------------------------- #
-def raw_to_p(raw: torch.Tensor) -> torch.Tensor:
+def raw_to_p(raw: torch.Tensor, p_max: float | None = None) -> torch.Tensor:
     """Map an unconstrained scalar to a super-ellipse exponent ``p = 1 + softplus(raw)``.
 
     This keeps ``p >= 1`` (a convex, valid cross-section) and is smooth.  The
     bias :data:`P2_RAW` below makes ``p = 2`` (an ordinary torus) the
     initialization, mirroring the paper's "init = sphere" choice.
+
+    ``p_max`` (e.g. ``6``) optionally *caps* the exponent for training stability.
+    The L^p SDF's sensitivity to ``p`` **saturates** as ``p`` grows -- a cross
+    section that is already nearly square barely changes when it gets boxier --
+    so an *unbounded* ``p`` is a near-dead direction the data loss cannot pull
+    back: on boxy assets it only ratchets up and destabilizes training (the
+    supertoroid's epoch-4 val spike).  Capping it (paired with an early
+    ``p -> 2`` square-regularizer in the trainer) keeps ``p`` in a stable,
+    well-conditioned range.  ``p > 6`` is already visually a rounded box, so the
+    cap costs no useful expressiveness.  ``p_max=None`` (the default) preserves
+    the original unbounded behavior, so pre-cap checkpoints and the training-free
+    optimizer are unaffected.
     """
-    return 1.0 + torch.nn.functional.softplus(raw)
+    p = 1.0 + torch.nn.functional.softplus(raw)
+    if p_max is not None:
+        p = p.clamp(max=float(p_max))
+    return p
 
 
 # raw value for which raw_to_p(raw) == 2  (softplus(raw) == 1).

@@ -6,7 +6,7 @@ Produces, in ``renders/``:
   * bunny.png          -- the Stanford bunny (complex traditional asset), 1024 pts
   * composite_noise.png-- box + cylinder boss + bored cylinder, sampled WITH noise
 
-Each figure has ground truth, "torus (based on Feng 26)" and "supertoroid (ours)", in the
+Each figure has ground truth, "torus (not ours; Feng 26)" and "supertoroid (ours)", in the
 paper's layout.
 If a trained checkpoint is given (``--model``), the per-point coefficients (and the
 supertoroid's squareness) come from the network; otherwise they are optimized per cloud.
@@ -69,7 +69,7 @@ def fit_models(shape, points, normals, *, model_t=None, model_s=None, model=None
         pat_t = PAT(points, normals, coeffs=_np(pt.coeffs), C=C, device=device)
         pat_s = PAT(points, normals, coeffs=_np(ps.coeffs), supertoroid=True,
                     p_tube=_np(ps.p_tube), p_ring=_np(ps.p_ring), C=C, device=device)
-    return {"torus (based on Feng 26)": pat_t, "supertoroid (ours)": pat_s}
+    return {"torus (not ours; Feng 26)": pat_t, "supertoroid (ours)": pat_s}
 
 
 def main():

@@ -12,7 +12,7 @@ self-contained PyTorch training notebook for Google Colab.
 
 ---
 
-## Gallery — torus (based on Feng 26) vs supertoroid (ours)
+## Gallery — torus (not ours; Feng 26) vs supertoroid (ours)
 
 Each figure follows the paper's comparison layout — **top:** ground-truth surface and the two
 reconstructions (marching cubes of the blended SDF); **bottom:** a slice of the signed-distance
@@ -42,7 +42,7 @@ underlying surface — no global solve, no spatial grid — by:
    match any second-order surface (sphere, ellipsoid, saddle, cylinder, plane as limits). It is
    determined from six polynomial coefficients of the local height function via Monge-patch
    curvatures (paper Sec. 4.1 + App. C). The signed per-point function is
-   $g_i = \operatorname{sign}(T_i)\,\phi_{T_i}$.
+   $g_i = \mathrm{sign}(T_i)\,\phi_{T_i}$.
 2. **Blending** the $g_i$ with a self-normalized, exponentially-weighted average (Eq. 1 / Eq. 25),
    where the shift $\sigma_{\mathbf{x}}$ and screening $\lambda_{\mathbf{x}}$ are chosen
    automatically per query from machine precision (Eq. 26).
@@ -161,7 +161,7 @@ closer to a boxy supertoroid target than a torus blend
 ## Comparison figures (Fig. 8 / Fig. 17 style)
 
 `make_renders.py` reproduces the paper's comparison layout (see the Gallery above) for six
-assets, all rendered as **torus (ours) vs supertoroid (ours)** — by default using the two trained
+assets, all rendered as **torus (not ours; Feng 26) vs supertoroid (ours)** — by default using the two trained
 networks in `assets/`:
 
 ```bash
@@ -190,7 +190,20 @@ always on the GPU.** `train_gpu.py` aborts if CUDA is unavailable; the Compose `
 reserves the NVIDIA GPU. It trains **both** a plain-torus model and a supertoroid model on **one
 shared dataset** that deliberately explores the supertoroid's extra subsurfaces (supertoroids
 with a wide range of squareness, plus the sharp/faceted cube, knurled cylinder and bolt plate),
-mixed with **noisy ModelNet40** real models (the ≥10,000-model set), all with input noise.
+mixed with **≥50,000 real CAD meshes from the [ABC dataset](https://deep-geometry.github.io/abc-dataset/)**
+(mechanical parts — brackets, gears, bolts, machined bodies — exactly the torus/supertoroid/cube
+domain), all with input noise. `pat.datasets.mesh_index` finds whatever real-mesh corpus is in
+`data/` (ABC `.obj`, Objaverse `.glb`, or ModelNet40 `.off`), so the trainer is dataset-agnostic;
+mix the real meshes in with `--meshes N --mesh-root data`.
+
+**Network (`CoeffNet`).** The coefficient predictor is a ~2× wider transformer than the paper's
+default — `d_embed=192, n_layers=6, n_heads=12, d_ff=672` (~2.06× the parameters). Width, not
+depth: at the `k+1=17`-token neighborhood the transformer is launch/memory-bound, so widening
+~doubles capacity while **depth (the latency driver) is held**, keeping it as snappy per
+neighborhood. The supertoroid's squareness exponent is **capped** (`p_max=6`) and trained with an
+annealed `p→2` regularizer, **LR warmup + cosine**, per-net/per-head grad clipping, a
+finite-loss-spike skip, and **weight EMA** — which together cure the squareness-runaway that made
+the earlier supertoroid val spike and stall around epoch 4–5.
 
 ### How the loss is computed (Eq. 27)
 

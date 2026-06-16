@@ -59,6 +59,40 @@ def modelnet_index(root: str = "data") -> list[str]:
     return []
 
 
+# Any mesh container trimesh can load (force='mesh' collapses scenes).  This is
+# the union of the formats the supported real-mesh corpora ship in: ModelNet40
+# is .off, the ABC CAD dataset is .obj, Objaverse is .glb, Thingi10K is .stl, ...
+MESH_EXTS = (".off", ".obj", ".ply", ".stl", ".glb", ".gltf")
+
+
+def mesh_index(root: str = "data", exts=MESH_EXTS,
+               cache_name: str = "mesh_index.txt") -> list[str]:
+    """Return every trimesh-loadable mesh found anywhere under ``root``.
+
+    The generalization of :func:`modelnet_index` beyond ModelNet40, so the
+    trainer can consume **any** real-mesh corpus the notebook downloads into
+    ``data/`` -- in particular the **ABC CAD dataset** (≥50k ``.obj`` files), and
+    also Objaverse ``.glb`` or Thingi10K ``.stl`` as fallbacks.  We walk the
+    directory directly (paths valid wherever the data is mounted), falling back
+    to a cached index file and finally to ``[]`` so a trainer can keep going on
+    the bundled analytic shapes until the real data lands.
+    """
+    exts = tuple(e.lower() for e in exts)
+    if os.path.isdir(root):
+        paths = []
+        for dp, _, fs in os.walk(root):
+            paths.extend(os.path.join(dp, f) for f in fs if f.lower().endswith(exts))
+        if paths:
+            return sorted(paths)
+    index_path = os.path.join(root, cache_name)
+    if os.path.isfile(index_path):
+        with open(index_path, "r", encoding="utf-8") as fh:
+            cached = [line.strip() for line in fh if line.strip()]
+        if cached and all(os.path.isfile(p) for p in cached[:5]):
+            return cached
+    return []
+
+
 # --------------------------------------------------------------------------- #
 #  Mesh loading / normalization
 # --------------------------------------------------------------------------- #
@@ -66,18 +100,25 @@ class DegenerateMeshError(ValueError):
     """Raised when a mesh has no usable geometry (no vertices / faces / area)."""
 
 
-def load_mesh_normalized(path: str) -> trimesh.Trimesh:
+def load_mesh_normalized(path: str, max_faces: int | None = None) -> trimesh.Trimesh:
     """Load ``path`` as a single mesh and rescale it into ``[-1, 1]^3``.
 
     Uses ``trimesh.load(force='mesh')`` (collapsing scenes / multi-geometry files
     into one mesh) followed by :func:`pat.shapes.normalize_to_unit_cube`.  Raises
     :class:`DegenerateMeshError` on empty or zero-area meshes so callers can skip
     them cleanly instead of producing NaNs downstream.
+
+    ``max_faces`` optionally skips meshes above a face budget (raising
+    :class:`DegenerateMeshError`): real CAD / scanned corpora (ABC, Objaverse)
+    contain the occasional multi-million-triangle model that would dominate
+    cache-build time for no extra training signal.
     """
     mesh = trimesh.load(path, force="mesh", process=False)
     if not isinstance(mesh, trimesh.Trimesh) or mesh.faces.shape[0] == 0 \
             or mesh.vertices.shape[0] == 0:
         raise DegenerateMeshError(f"{path}: no triangular geometry")
+    if max_faces is not None and mesh.faces.shape[0] > max_faces:
+        raise DegenerateMeshError(f"{path}: {mesh.faces.shape[0]} faces > max_faces={max_faces}")
     if not np.isfinite(mesh.vertices).all() or float(mesh.area) <= 0.0:
         raise DegenerateMeshError(f"{path}: degenerate (zero area / non-finite verts)")
     mesh = shapes.normalize_to_unit_cube(mesh)

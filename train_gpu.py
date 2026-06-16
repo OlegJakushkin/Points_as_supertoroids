@@ -47,6 +47,47 @@ DEVICE = "cuda"
 
 
 # --------------------------------------------------------------------------- #
+#  Weight EMA (smooths the saved checkpoint past transient spikes)
+# --------------------------------------------------------------------------- #
+class EMA:
+    """Exponential moving average of a model's parameters.
+
+    We validate and **save** the EMA weights, not the raw training weights, so a
+    single bad (corner-heavy) mini-batch can never land in the released model --
+    it smooths the supertoroid's epoch-4 dip out of the checkpoint and makes the
+    best-by-val selection stable.  The averaged ``state_dict`` is structurally
+    identical, so ``pat.PAT`` / ``CoeffNet(**config)`` load it unchanged.
+    """
+
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {n: p.detach().clone() for n, p in model.named_parameters()}
+        self._backup = None
+
+    @torch.no_grad()
+    def update(self, model):
+        d = self.decay
+        for n, p in model.named_parameters():
+            self.shadow[n].mul_(d).add_(p.detach(), alpha=1.0 - d)
+
+    @torch.no_grad()
+    def store_and_copy_to(self, model):
+        """Stash the live weights and load the EMA weights into ``model``."""
+        self._backup = {n: p.detach().clone() for n, p in model.named_parameters()}
+        for n, p in model.named_parameters():
+            p.data.copy_(self.shadow[n].to(p.device))
+
+    @torch.no_grad()
+    def restore(self, model):
+        """Undo :meth:`store_and_copy_to`, putting the live weights back."""
+        if self._backup is None:
+            return
+        for n, p in model.named_parameters():
+            p.data.copy_(self._backup[n].to(p.device))
+        self._backup = None
+
+
+# --------------------------------------------------------------------------- #
 #  Assets -> dense per-asset clouds (cached once)
 # --------------------------------------------------------------------------- #
 def random_analytic_shape(rng):
@@ -86,17 +127,19 @@ def _queries(rng, surf, n_query, bound):
     return np.concatenate([band, bulk], 0)
 
 
-def mesh_dense_example(path, dense, n_query, rng, bound=1.0, dense_surf=50000):
+def mesh_dense_example(path, dense, n_query, rng, bound=1.0, dense_surf=50000,
+                       max_faces=None):
     """One dense (cloud, normals, queries, GT SDF) tuple from a real mesh.
 
     Ground-truth signed distance uses a KD-tree over a dense surface sample
     (fast and accurate to the surface spacing) -- the same trick as the local
     trainer, which keeps real-data caching fast on a hosted GPU/disk.
+    ``max_faces`` skips pathologically heavy meshes (see ``load_mesh_normalized``).
     """
     from scipy.spatial import cKDTree
     from pat.datasets import load_mesh_normalized
     from pat.shapes import sample_mesh
-    mesh = load_mesh_normalized(path)
+    mesh = load_mesh_normalized(path, max_faces=max_faces)
     pts, nrm = sample_mesh(mesh, dense, rng)
     # ModelNet meshes have duplicate/degenerate faces -> coincident points and the
     # occasional zero-area-face normal.  Jitter the cloud (breaks coincidences, which
@@ -117,19 +160,23 @@ def mesh_dense_example(path, dense, n_query, rng, bound=1.0, dense_surf=50000):
 
 
 def build_dense_cache(n_analytic, dense, n_query, bound=1.0, seed=0,
-                      n_modelnet=0, modelnet_root="data"):
-    """Sample a dense cloud + GT queries per asset (analytic + optional ModelNet).
+                      n_meshes=0, mesh_root="data", max_faces=None):
+    """Sample a dense cloud + GT queries per asset (analytic + optional real meshes).
 
-    Returns stacked CPU tensors of ``n_analytic + (cached ModelNet)`` assets.  On a
-    big-memory host (e.g. an A100 80 GB) set ``n_modelnet`` to mix in real CAD models.
+    Returns stacked CPU tensors of ``n_analytic + (cached real meshes)`` assets.
+    On a big-memory host (e.g. an A100 80 GB) set ``n_meshes`` to mix in a real
+    CAD corpus -- by default whatever the notebook downloads into ``data/`` (the
+    **ABC CAD dataset**, ≥50k ``.obj``; or Objaverse / ModelNet40), found via
+    :func:`pat.datasets.mesh_index`.
     """
     rng = np.random.default_rng(seed)
     paths = []
-    if n_modelnet > 0:
-        from pat.datasets import modelnet_index
-        paths = modelnet_index(modelnet_root)
+    if n_meshes > 0:
+        from pat.datasets import mesh_index
+        paths = mesh_index(mesh_root)
         rng.shuffle(paths)
-        print(f"  ModelNet pool: {len(paths)} models; caching up to {n_modelnet}", flush=True)
+        print(f"  real-mesh pool: {len(paths)} meshes under {mesh_root!r}; "
+              f"caching up to {n_meshes}", flush=True)
 
     P, N, Q, PHI = [], [], [], []
     t0 = time.time()
@@ -144,13 +191,15 @@ def build_dense_cache(n_analytic, dense, n_query, bound=1.0, seed=0,
         Q.append(q.astype(np.float32)); PHI.append(sh.sdf(q).astype(np.float32))
         if (i + 1) % 2000 == 0:
             print(f"  analytic {i+1}/{n_analytic}  ({(i+1)/(time.time()-t0):.0f}/s)", flush=True)
-    # real ModelNet assets
+    # real meshes (ABC / Objaverse / ModelNet ...)
     got = 0
+    tried = 0
     for path in paths:
-        if got >= n_modelnet:
+        if got >= n_meshes:
             break
+        tried += 1
         try:
-            ex = mesh_dense_example(path, dense, n_query, rng, bound)
+            ex = mesh_dense_example(path, dense, n_query, rng, bound, max_faces=max_faces)
         except Exception:
             continue
         if not all(np.isfinite(a).all() for a in ex):       # drop degenerate meshes
@@ -158,10 +207,15 @@ def build_dense_cache(n_analytic, dense, n_query, bound=1.0, seed=0,
         P.append(ex[0]); N.append(ex[1]); Q.append(ex[2]); PHI.append(ex[3])
         got += 1
         if got % 1000 == 0:
-            print(f"  modelnet {got}/{n_modelnet}  ({got/(time.time()-t0):.0f}/s)", flush=True)
+            print(f"  meshes {got}/{n_meshes}  (kept {got}/{tried}; "
+                  f"{got/(time.time()-t0):.0f}/s)", flush=True)
+    if n_meshes > 0 and got < n_meshes:
+        print(f"  NOTE: only cached {got}/{n_meshes} real meshes (pool had "
+              f"{len(paths)}, {tried} tried) -- download more chunks for the full set.",
+              flush=True)
 
     total = len(P)
-    print(f"dense cache: {total} assets ({n_analytic} analytic + {got} ModelNet) "
+    print(f"dense cache: {total} assets ({n_analytic} analytic + {got} real meshes) "
           f"in {time.time()-t0:.0f}s", flush=True)
     return {"P": torch.from_numpy(np.stack(P)), "N": torch.from_numpy(np.stack(N)),
             "Q": torch.from_numpy(np.stack(Q)), "PHI": torch.from_numpy(np.stack(PHI))}
@@ -218,8 +272,17 @@ def batched_coeffs(net, pts, nrm, k, chunk=3072):
     return coeffs, sq
 
 
-def batched_loss(net, pts, nrm, q, phi_true, k, C=64.0, eik=0.1, chunk=3072):
-    """L1 + eikonal blend loss over a batch of clouds (all on GPU)."""
+def batched_loss(net, pts, nrm, q, phi_true, k, C=64.0, eik=0.1, chunk=3072,
+                 square_reg=0.0):
+    """L1 + eikonal blend loss over a batch of clouds (all on GPU).
+
+    ``square_reg`` adds ``square_reg * mean((p - 2)^2)`` over the supertoroid
+    squareness exponents -- a soft pull toward ``p = 2`` (an ordinary torus).
+    Annealed from a small value to 0 over the first few epochs by the trainer,
+    it keeps the squareness near the well-conditioned torus regime while the
+    geometry settles, which (together with the ``p`` cap) cures the supertoroid's
+    epoch-4 squareness blow-up.  A no-op for the plain-torus net (``sq is None``).
+    """
     coeffs, sq = batched_coeffs(net, pts, nrm, k, chunk=chunk)
     params = core.coeffs_to_torus(pts, nrm, coeffs)            # batched (B,N,...)
     q = q.detach().clone().requires_grad_(True)
@@ -240,7 +303,10 @@ def batched_loss(net, pts, nrm, q, phi_true, k, C=64.0, eik=0.1, chunk=3072):
     grad = torch.nan_to_num(grad)                             # guard 0/0 eikonal gradients
     l_dist = (phi - phi_true).abs().mean()
     l_eik = (1.0 - grad.norm(dim=-1)).abs().mean()
-    return l_dist + eik * l_eik, l_dist.detach(), l_eik.detach()
+    loss = l_dist + eik * l_eik
+    if sq is not None and square_reg > 0.0:
+        loss = loss + square_reg * ((sq - 2.0) ** 2).mean()
+    return loss, l_dist.detach(), l_eik.detach()
 
 
 # --------------------------------------------------------------------------- #
@@ -315,10 +381,17 @@ def eval_noise_split(net, eval_cache, k, noise_std=0.015, mb=24, n_points=512):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--assets", type=int, default=10000, help="analytic training assets")
-    ap.add_argument("--modelnet", type=int, default=0,
-                    help="real ModelNet40 models to mix in (download first; big-RAM hosts)")
-    ap.add_argument("--modelnet-root", default="data")
-    ap.add_argument("--epochs", type=int, default=6, help=">= 5 epochs")
+    # Real meshes mixed in.  --meshes is the new generic name (any corpus found by
+    # pat.datasets.mesh_index under --mesh-root: ABC .obj, Objaverse .glb, ModelNet
+    # .off); --modelnet / --modelnet-root remain as back-compat aliases.
+    ap.add_argument("--meshes", "--modelnet", dest="meshes", type=int, default=0,
+                    help="real meshes to mix in (download first; big-RAM hosts). "
+                         ">=50k real CAD meshes (ABC dataset) is the intended setting.")
+    ap.add_argument("--mesh-root", "--modelnet-root", dest="mesh_root", default="data",
+                    help="root dir scanned for real meshes (ABC/Objaverse/ModelNet)")
+    ap.add_argument("--max-faces", type=int, default=200000,
+                    help="skip real meshes above this face count (heavy CAD/scan models)")
+    ap.add_argument("--epochs", type=int, default=8, help=">= 5 epochs (8 gives cosine room)")
     ap.add_argument("--dense", type=int, default=1024, help="dense points cached per asset")
     ap.add_argument("--n-points", type=int, default=512, help="points fetched per cloud per epoch")
     ap.add_argument("--n-query", type=int, default=160)
@@ -328,11 +401,39 @@ def main():
     ap.add_argument("--frac-noisy", type=float, default=0.5, help="fraction of points noised (train)")
     ap.add_argument("--noise", type=float, default=0.015)
     ap.add_argument("--eval-assets", type=int, default=400)
-    ap.add_argument("--lr", type=float, default=8e-4)
+    ap.add_argument("--lr", type=float, default=8e-4, help="AdamW lr for the plain-torus net")
+    ap.add_argument("--lr-super", type=float, default=9e-4,
+                    help="AdamW lr for the (wider, stiffer) supertoroid net")
     ap.add_argument("--weight-decay", type=float, default=1e-4,
                     help="AdamW weight decay (regularization; curbs the torus overfitting)")
     ap.add_argument("--dropout", type=float, default=0.05,
                     help="transformer dropout (regularization)")
+    # --- architecture (2x-wider-but-snappy CoeffNet) ---
+    ap.add_argument("--d-embed", type=int, default=192, help="token width (was 128)")
+    ap.add_argument("--n-layers", type=int, default=6, help="encoder depth (held = latency)")
+    ap.add_argument("--n-heads", type=int, default=12, help="attention heads (head_dim 192/12=16)")
+    ap.add_argument("--d-ff", type=int, default=672, help="FFN width (was 512); ~2x params total")
+    ap.add_argument("--p-max", type=float, default=6.0,
+                    help="cap on the supertoroid squareness exponent (stability)")
+    # --- training-stability knobs (cure the supertoroid epoch-4/5 spike + stall) ---
+    ap.add_argument("--warmup-frac", type=float, default=0.05,
+                    help="linear LR warmup as a fraction of total steps, then cosine")
+    ap.add_argument("--square-reg", type=float, default=0.05,
+                    help="initial p->2 squareness pull (annealed to 0 over --square-reg-epochs)")
+    ap.add_argument("--square-reg-epochs", type=float, default=3.0,
+                    help="anneal the squareness pull to 0 by this epoch")
+    ap.add_argument("--eik", type=float, default=0.1, help="eikonal weight (ramped over 1st epoch)")
+    ap.add_argument("--eik-warmup-epochs", type=float, default=1.0,
+                    help="ramp the eikonal weight 0->--eik over this many epochs")
+    ap.add_argument("--clip", type=float, default=1.0, help="global grad-norm clip (torus net)")
+    ap.add_argument("--clip-super", type=float, default=0.5,
+                    help="global grad-norm clip (supertoroid net; tighter)")
+    ap.add_argument("--head-clip", type=float, default=0.5,
+                    help="extra grad-norm clip on the supertoroid head (squareness) only")
+    ap.add_argument("--spike-factor", type=float, default=3.0,
+                    help="skip a finite step whose loss exceeds this x the trailing mean")
+    ap.add_argument("--ema-decay", type=float, default=0.999,
+                    help="weight-EMA decay; the EMA weights are validated and saved")
     ap.add_argument("--outdir", default="assets")
     ap.add_argument("--cache-file", default="",
                     help="persist the dense cache here; reused if present (skips re-caching)")
@@ -347,24 +448,28 @@ def main():
               f"point set will NOT vary across epochs (only the noise will). Use --dense > "
               f"--n-points for per-epoch nearest-set variation.", flush=True)
     print(f"device: {torch.cuda.get_device_name(0)} | analytic {args.assets} + "
-          f"modelnet {args.modelnet} | epochs {args.epochs} | batch {args.batch}", flush=True)
+          f"meshes {args.meshes} | epochs {args.epochs} | batch {args.batch}", flush=True)
 
-    # Build the dense cache once and reuse it: caching 12k real meshes takes ~15-20 min,
-    # so a persisted --cache-file (e.g. on Google Drive) lets re-runs skip it entirely.
+    # Build the dense cache once and reuse it: caching tens of thousands of real
+    # meshes is slow (CPU/disk-bound), so a persisted --cache-file (e.g. on Google
+    # Drive) lets re-runs skip it entirely.  The cache may hold fewer real meshes
+    # than requested if the corpus on disk is smaller (partial download), so we
+    # accept any cache whose total asset count does not exceed the request.
     cache = None
     if args.cache_file and os.path.exists(args.cache_file):
         print(f"loading dense cache {args.cache_file}", flush=True)
         c = torch.load(args.cache_file, weights_only=False)
-        if (c["P"].shape[0] == args.assets + args.modelnet and c["P"].shape[1] == args.dense
+        if (c["P"].shape[0] <= args.assets + args.meshes and c["P"].shape[1] == args.dense
                 and c["Q"].shape[1] == args.n_query):
             cache = c
         else:
             print(f"  cache shape {tuple(c['P'].shape)} != request "
-                  f"(assets={args.assets+args.modelnet}, dense={args.dense}, "
+                  f"(assets+meshes<={args.assets+args.meshes}, dense={args.dense}, "
                   f"n_query={args.n_query}) -> rebuilding", flush=True)
     if cache is None:
         cache = build_dense_cache(args.assets, args.dense, args.n_query, seed=0,
-                                  n_modelnet=args.modelnet, modelnet_root=args.modelnet_root)
+                                  n_meshes=args.meshes, mesh_root=args.mesh_root,
+                                  max_faces=args.max_faces)
         if args.cache_file:
             os.makedirs(os.path.dirname(args.cache_file) or ".", exist_ok=True)
             torch.save(cache, args.cache_file)
@@ -373,23 +478,50 @@ def main():
     cache = {kk: v.to(DEVICE) for kk, v in cache.items()}
     eval_cache = build_dense_cache(args.eval_assets, args.dense, args.n_query, seed=999)
 
-    cfg_t = dict(d_embed=128, n_layers=6, n_heads=8, d_ff=512, supertoroid=False,
-                 dropout=args.dropout)
-    cfg_s = dict(d_embed=128, n_layers=6, n_heads=8, d_ff=512, supertoroid=True,
-                 dropout=args.dropout)
+    # ~2x-wider-but-snappy CoeffNet (width, not depth: at the k+1=17-token
+    # neighborhood the transformer is launch/memory-bound, so widening d_embed/d_ff
+    # ~2x the params while holding n_layers keeps per-neighborhood latency ~constant).
+    # The supertoroid net additionally caps its squareness exponent at --p-max.
+    arch = dict(d_embed=args.d_embed, n_layers=args.n_layers, n_heads=args.n_heads,
+                d_ff=args.d_ff, dropout=args.dropout)
+    cfg_t = dict(supertoroid=False, **arch)
+    cfg_s = dict(supertoroid=True, p_max=args.p_max, **arch)
     net_t = CoeffNet(**cfg_t).to(DEVICE)
     net_s = CoeffNet(**cfg_s).to(DEVICE)
+    n_par_t = sum(p.numel() for p in net_t.parameters())
+    n_par_s = sum(p.numel() for p in net_s.parameters())
     # AdamW (decoupled weight decay) regularizes -- it most helps the plain torus,
     # which otherwise overfits by contorting its curvature coefficients to fake the
-    # boxy shapes its fixed circular cross-section can't represent.
+    # boxy shapes its fixed circular cross-section can't represent.  The supertoroid
+    # net gets its own (slightly higher) lr.
     opt_t = torch.optim.AdamW(net_t.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    opt_s = torch.optim.AdamW(net_s.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    opt_s = torch.optim.AdamW(net_s.parameters(), lr=args.lr_super, weight_decay=args.weight_decay)
     steps_per_epoch = A // args.batch
     total = args.epochs * steps_per_epoch
-    sch_t = torch.optim.lr_scheduler.CosineAnnealingLR(opt_t, T_max=total)
-    sch_s = torch.optim.lr_scheduler.CosineAnnealingLR(opt_s, T_max=total)
+    warmup = max(1, int(args.warmup_frac * total))
+
+    def warmup_cosine(opt, lr):
+        """Linear LR warmup (no high-LR kick on an early stiff batch) then cosine."""
+        w = torch.optim.lr_scheduler.LinearLR(opt, start_factor=0.01, total_iters=warmup)
+        c = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, total - warmup),
+                                                       eta_min=lr * 0.05)
+        return torch.optim.lr_scheduler.SequentialLR(opt, [w, c], milestones=[warmup])
+
+    sch_t = warmup_cosine(opt_t, args.lr)
+    sch_s = warmup_cosine(opt_s, args.lr_super)
+    ema_t = EMA(net_t, args.ema_decay)
+    ema_s = EMA(net_s, args.ema_decay)
+    # per-net trailing-mean loss for the finite-spike skip guard
+    loss_ema = {"t": None, "s": None}
+    eik_warm_steps = max(1, int(args.eik_warmup_epochs * steps_per_epoch))
+    sq_reg_steps = max(1, int(args.square_reg_epochs * steps_per_epoch))
+
+    print(f"arch d_embed={args.d_embed} n_layers={args.n_layers} n_heads={args.n_heads} "
+          f"d_ff={args.d_ff} | params torus {n_par_t/1e6:.2f}M supertoroid {n_par_s/1e6:.2f}M "
+          f"| p_max {args.p_max}", flush=True)
     print(f"{total} steps ({args.epochs} epochs x {steps_per_epoch} batches of {args.batch}) "
-          f"x 2 models over {A} assets", flush=True)
+          f"x 2 models over {A} assets | warmup {warmup} steps + cosine | "
+          f"lr T {args.lr:g} S {args.lr_super:g} | EMA {args.ema_decay}", flush=True)
     print(f"per-epoch (re-rolled each epoch): resample {args.n_points}/{args.dense} pts per asset "
           f"(set varies={args.dense > args.n_points}); re-noise {args.frac_noisy:.0%} of them with "
           f"fresh noise; kNN recomputed per step", flush=True)
@@ -416,25 +548,46 @@ def main():
             pts, nrm = sample_epoch_clouds(cache, idx, args.n_points, noise_e,
                                            args.frac_noisy, gen)
             q = cache["Q"][idx]; phi = cache["PHI"][idx]
-            for net, opt, sch, key in ((net_t, opt_t, sch_t, "t"), (net_s, opt_s, sch_s, "s")):
-                loss, ld, le = batched_loss(net, pts, nrm, q, phi, args.k, chunk=args.chunk)
+            # Per-step schedules: ramp the (2nd-order) eikonal term up over the first
+            # epoch so it isn't shaping a still-random squareness geometry, and anneal
+            # the p->2 square pull to 0 once the geometry has settled.
+            gstep = epoch * steps_per_epoch + b
+            eik_e = args.eik * min(1.0, (gstep + 1) / eik_warm_steps)
+            sq_reg_e = args.square_reg * max(0.0, 1.0 - gstep / sq_reg_steps)
+            for net, opt, sch, ema, key, clip, is_super in (
+                    (net_t, opt_t, sch_t, ema_t, "t", args.clip, False),
+                    (net_s, opt_s, sch_s, ema_s, "s", args.clip_super, True)):
+                loss, ld, le = batched_loss(net, pts, nrm, q, phi, args.k, chunk=args.chunk,
+                                            eik=eik_e,
+                                            square_reg=(sq_reg_e if is_super else 0.0))
                 opt.zero_grad()
-                # Skip any non-finite step: a single bad (degenerate) batch must not
-                # poison the weights -- once Adam writes a NaN, it never recovers, and
-                # clip_grad_norm does not sanitize NaNs.
-                if torch.isfinite(loss):
+                v = float(loss.detach()) if torch.isfinite(loss) else float("inf")
+                # Skip a step that is non-finite OR a finite spike (loss >> trailing
+                # mean): a single bad (degenerate / boxy-corner) batch must not poison
+                # the weights -- once Adam writes a NaN/huge moment it never recovers,
+                # and clip_grad_norm sanitizes neither NaNs nor a finite-but-huge step.
+                le_ref = loss_ema[key]
+                spike = (le_ref is not None) and (v > args.spike_factor * le_ref)
+                if torch.isfinite(loss) and not spike:
                     loss.backward()
                     for p in net.parameters():
                         if p.grad is not None:
                             torch.nan_to_num_(p.grad, 0.0, 0.0, 0.0)
-                    torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+                    # Per-group clip on the squareness head FIRST (a localized
+                    # squareness explosion would otherwise be diluted below the global
+                    # threshold), then the global clip.
+                    if is_super and args.head_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(net.head.parameters(), args.head_clip)
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), clip)
                     opt.step()
+                    ema.update(net)
+                    loss_ema[key] = v if le_ref is None else 0.98 * le_ref + 0.02 * v
                 sch.step()
-                v = float(loss.detach()) if torch.isfinite(loss) else 0.0
+                vlog = v if (torch.isfinite(loss) and not spike) else 0.0
                 if key == "t":
-                    rt += v
+                    rt += vlog
                 else:
-                    rs += v
+                    rs += vlog
             done += 1
             if done % args.log_every == 0:
                 rate = done / (time.time() - t0)
@@ -443,7 +596,11 @@ def main():
                       f"noise {noise_e:.3f} loss T {rt/args.log_every:.4f} S {rs/args.log_every:.4f} "
                       f"| {rate:.1f} it/s | ETA {eta:.1f} min", flush=True)
                 rt = rs = 0.0
-        # end-of-epoch validation: reconstruct a default torus AND a sharp cube
+        # end-of-epoch validation + save on the EMA weights (smooths transient
+        # spikes out of the released model); restore the live weights afterwards.
+        ema_t.store_and_copy_to(net_t)
+        ema_s.store_and_copy_to(net_s)
+        # reconstruct a default torus AND a sharp cube
         vt, vt_cube = validate_recon(net_t, val_shapes)
         vs, vs_cube = validate_recon(net_s, val_shapes)
         ct, nt = eval_noise_split(net_t, eval_cache, args.k, args.noise, n_points=args.n_points)
@@ -465,6 +622,9 @@ def main():
                 torch.save({"state_dict": net.state_dict(), "config": cfg,
                             "val_torus_err": v, "history": history},
                            os.path.join(args.outdir, name))
+        # put the live training weights back (validation/save used the EMA copy)
+        ema_t.restore(net_t)
+        ema_s.restore(net_s)
     print(f"DONE. best val-torus-err  torus {best['t']:.4f}  supertoroid {best['s']:.4f}", flush=True)
     save_curves(history, os.path.join(args.outdir, "training_curves.png"))
 
@@ -478,15 +638,15 @@ def save_curves(history, path):
         ep = [h["epoch"] for h in history]
         nan = float("nan")
         fig, ax = plt.subplots(1, 2, figsize=(12, 4))
-        ax[0].plot(ep, [h["val_torus_t"] for h in history], "-o", color="C0", label="torus-net | torus")
-        ax[0].plot(ep, [h["val_torus_s"] for h in history], "-o", color="C1", label="super-net | torus")
-        ax[0].plot(ep, [h.get("val_cube_t", nan) for h in history], "--s", color="C0", label="torus-net | cube")
-        ax[0].plot(ep, [h.get("val_cube_s", nan) for h in history], "--s", color="C1", label="super-net | cube")
+        ax[0].plot(ep, [h["val_torus_t"] for h in history], "-o", color="C0", label="Feng26 net | torus")
+        ax[0].plot(ep, [h["val_torus_s"] for h in history], "-o", color="C1", label="ours net | torus")
+        ax[0].plot(ep, [h.get("val_cube_t", nan) for h in history], "--s", color="C0", label="Feng26 net | cube")
+        ax[0].plot(ep, [h.get("val_cube_s", nan) for h in history], "--s", color="C1", label="ours net | cube")
         ax[0].axhline(0.01, ls=":", c="gray", label="invisible-by-eye bar")
         ax[0].set_title("val: reconstruct a default torus / sharp cube")
         ax[0].set_xlabel("epoch"); ax[0].set_ylabel("mean abs SDF err"); ax[0].legend(fontsize=8)
         for m, lab in [("eval_clean_s", "supertoroid clean"), ("eval_noisy_s", "supertoroid noisy"),
-                       ("eval_clean_t", "torus clean"), ("eval_noisy_t", "torus noisy")]:
+                       ("eval_clean_t", "Feng26 torus clean"), ("eval_noisy_t", "Feng26 torus noisy")]:
             ax[1].plot(ep, [h[m] for h in history], "-o", label=lab)
         ax[1].set_title("held-out eval (50% clean / 50% noisy)")
         ax[1].set_xlabel("epoch"); ax[1].legend()
