@@ -1,0 +1,15 @@
+# Core numerics + the PAT pipeline
+numpy>=1.26
+scipy>=1.11
+torch>=2.2
+
+# Reconstruction + meshes
+scikit-image>=0.22      # marching cubes
+trimesh>=4.0            # optional: mesh loading/sampling for the mesh demos
+
+# Visualization ("nmwsharp" stack: Nicholas Sharp's polyscope)
+polyscope>=2.2
+matplotlib>=3.7         # loss curves / 2D plots
+
+# Tests
+pytest>=7.0

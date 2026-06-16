@@ -1,0 +1,44 @@
+# Points as (Super)Tori — CUDA train / reconstruct / test, no host setup needed.
+#
+#   docker compose build
+#   docker compose run --rm train     # train both torus + supertoroid models on the GPU
+#   docker compose run --rm render    # reconstruct meshes + comparison images (uses pretrained)
+#   docker compose run --rm test      # run the test suite
+#
+# Requires the NVIDIA Container Toolkit on the host. Outputs land in ./assets and
+# ./renders via the bind mount, so trained models and images persist on the host.
+
+x-gpu: &gpu
+  build: .
+  image: points-as-supertoroids:latest
+  volumes:
+    - ./:/workspace
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  # Train BOTH a plain-torus and a supertoroid model on the same dataset (GPU).
+  train:
+    <<: *gpu
+    command: python train_gpu.py --epochs 40 --cache 4000 --modelnet 1500
+
+  # Reconstruct meshes + render the torus-vs-supertoroid comparison figures
+  # using the pretrained checkpoints in assets/ (this is "mesh generation").
+  render:
+    <<: *gpu
+    command: python make_renders.py --model assets/pat_supertoroid.pt --res 112
+
+  # Reconstruct a single mesh (OBJ) from a shape's point cloud with the trained model.
+  meshgen:
+    <<: *gpu
+    command: python -m pat.meshgen --shape torus --model assets/pat_supertoroid.pt --out renders/torus.obj
+
+  # Run the test suite inside the container.
+  test:
+    <<: *gpu
+    command: pytest -q
