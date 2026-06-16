@@ -98,7 +98,13 @@ def mesh_dense_example(path, dense, n_query, rng, bound=1.0, dense_surf=50000):
     from pat.shapes import sample_mesh
     mesh = load_mesh_normalized(path)
     pts, nrm = sample_mesh(mesh, dense, rng)
-    nrm = nrm / (np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9)
+    # ModelNet meshes have duplicate/degenerate faces -> coincident points and the
+    # occasional zero-area-face normal.  Jitter the cloud (breaks coincidences, which
+    # otherwise make a neighborhood's median distance 0 and blow up the features) and
+    # replace degenerate normals with a fallback.
+    pts = pts + rng.normal(scale=1e-4, size=pts.shape)
+    nn = np.linalg.norm(nrm, axis=1, keepdims=True)
+    nrm = np.where(nn < 1e-6, np.array([0.0, 0.0, 1.0]), nrm / (nn + 1e-9))
     surf, _ = sample_mesh(mesh, n_query, rng)
     q = _queries(rng, surf, n_query, bound)
     ds, dn = sample_mesh(mesh, dense_surf, rng)
@@ -146,6 +152,8 @@ def build_dense_cache(n_analytic, dense, n_query, bound=1.0, seed=0,
         try:
             ex = mesh_dense_example(path, dense, n_query, rng, bound)
         except Exception:
+            continue
+        if not all(np.isfinite(a).all() for a in ex):       # drop degenerate meshes
             continue
         P.append(ex[0]); N.append(ex[1]); Q.append(ex[2]); PHI.append(ex[3])
         got += 1
@@ -229,6 +237,7 @@ def batched_loss(net, pts, nrm, q, phi_true, k, C=64.0, eik=0.1, chunk=3072):
     g = sign * sdf                                            # (B, Q, N)
     phi = core.blend_batched(q, pts, g, C=C)                  # (B, Q)
     grad, = torch.autograd.grad(phi.sum(), q, create_graph=True)
+    grad = torch.nan_to_num(grad)                             # guard 0/0 eikonal gradients
     l_dist = (phi - phi_true).abs().mean()
     l_eik = (1.0 - grad.norm(dim=-1)).abs().mean()
     return l_dist + eik * l_eik, l_dist.detach(), l_eik.detach()
@@ -315,14 +324,34 @@ def main():
     ap.add_argument("--eval-assets", type=int, default=400)
     ap.add_argument("--lr", type=float, default=8e-4)
     ap.add_argument("--outdir", default="assets")
+    ap.add_argument("--cache-file", default="",
+                    help="persist the dense cache here; reused if present (skips re-caching)")
     ap.add_argument("--log-every", type=int, default=80, help="log every N steps")
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
     print(f"device: {torch.cuda.get_device_name(0)} | analytic {args.assets} + "
           f"modelnet {args.modelnet} | epochs {args.epochs} | batch {args.batch}", flush=True)
 
-    cache = build_dense_cache(args.assets, args.dense, args.n_query, seed=0,
-                              n_modelnet=args.modelnet, modelnet_root=args.modelnet_root)
+    # Build the dense cache once and reuse it: caching 12k real meshes takes ~15-20 min,
+    # so a persisted --cache-file (e.g. on Google Drive) lets re-runs skip it entirely.
+    cache = None
+    if args.cache_file and os.path.exists(args.cache_file):
+        print(f"loading dense cache {args.cache_file}", flush=True)
+        c = torch.load(args.cache_file, weights_only=False)
+        if (c["P"].shape[0] == args.assets + args.modelnet and c["P"].shape[1] == args.dense
+                and c["Q"].shape[1] == args.n_query):
+            cache = c
+        else:
+            print(f"  cache shape {tuple(c['P'].shape)} != request "
+                  f"(assets={args.assets+args.modelnet}, dense={args.dense}, "
+                  f"n_query={args.n_query}) -> rebuilding", flush=True)
+    if cache is None:
+        cache = build_dense_cache(args.assets, args.dense, args.n_query, seed=0,
+                                  n_modelnet=args.modelnet, modelnet_root=args.modelnet_root)
+        if args.cache_file:
+            os.makedirs(os.path.dirname(args.cache_file) or ".", exist_ok=True)
+            torch.save(cache, args.cache_file)
+            print(f"saved dense cache -> {args.cache_file}", flush=True)
     A = cache["P"].shape[0]
     cache = {kk: v.to(DEVICE) for kk, v in cache.items()}
     eval_cache = build_dense_cache(args.eval_assets, args.dense, args.n_query, seed=999)
@@ -361,13 +390,23 @@ def main():
             q = cache["Q"][idx]; phi = cache["PHI"][idx]
             for net, opt, sch, key in ((net_t, opt_t, sch_t, "t"), (net_s, opt_s, sch_s, "s")):
                 loss, ld, le = batched_loss(net, pts, nrm, q, phi, args.k, chunk=args.chunk)
-                opt.zero_grad(); loss.backward()
-                torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
-                opt.step(); sch.step()
+                opt.zero_grad()
+                # Skip any non-finite step: a single bad (degenerate) batch must not
+                # poison the weights -- once Adam writes a NaN, it never recovers, and
+                # clip_grad_norm does not sanitize NaNs.
+                if torch.isfinite(loss):
+                    loss.backward()
+                    for p in net.parameters():
+                        if p.grad is not None:
+                            torch.nan_to_num_(p.grad, 0.0, 0.0, 0.0)
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+                    opt.step()
+                sch.step()
+                v = float(loss.detach()) if torch.isfinite(loss) else 0.0
                 if key == "t":
-                    rt += float(loss.detach())
+                    rt += v
                 else:
-                    rs += float(loss.detach())
+                    rs += v
             done += 1
             if done % args.log_every == 0:
                 rate = done / (time.time() - t0)
