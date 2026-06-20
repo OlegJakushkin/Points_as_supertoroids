@@ -84,6 +84,28 @@ def test_student_shapes_and_reconstruct():
     assert K >= 1 and sp.M == K
 
 
+def test_batch_blend_matches_single():
+    from pat.teacher_batch import BatchSplats
+    sp = S.SuperToroidSplats.from_rows(torch.randn(6, S.ROW_W) * 0.25)
+    bs = BatchSplats(sp.param_rows()[None], torch.ones(1, 6, dtype=torch.bool), device="cpu")
+    q = torch.randn(40, 3) * 0.6
+    assert torch.allclose(sp.sdf_torch(q), bs.blend_sdf(q[None])[0], atol=1e-4)
+    bs.alive[0, 2] = False                                   # killing a splat changes the blend
+    assert (sp.sdf_torch(q) - bs.blend_sdf(q[None])[0]).abs().max() > 1e-5
+
+
+def test_fit_teacher_batch_runs():
+    from pat import teacher_batch as TB
+    Ps = [_torus(seed=0)[0], _torus(R=0.5, r=0.18, seed=1)[0]]
+    Ns = [_torus(seed=0)[1], _torus(R=0.5, r=0.18, seed=1)[1]]
+    res = TB.fit_teacher_batch(Ps, Ns, m_init=20, md_target=0.02, res=36, steps_warm=40,
+                               steps_refit=20, keep_schedule=(0.6, 0.4), min_keep=4,
+                               k_dense=15000, device="cpu")
+    assert len(res) == 2
+    for sp, md, iou, status in res:
+        assert sp.M >= 4 and np.isfinite(md) and status in ("ok", "hard")
+
+
 def test_groupnet_loss_decreases():
     P, N = _torus(P_n=300)
     # a synthetic 2-cluster owner label the position-aware net can learn
