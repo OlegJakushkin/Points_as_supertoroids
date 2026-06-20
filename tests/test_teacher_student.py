@@ -106,6 +106,35 @@ def test_fit_teacher_batch_runs():
         assert sp.M >= 4 and np.isfinite(md) and status in ("ok", "hard")
 
 
+def test_eval3d_voxel_free_metrics(tmp_path):
+    from pat import eval3d as E
+    shapes = E.canonical_shapes(bunny=False)                  # skip bunny (slow mesh) for the unit test
+    assert len(shapes) == 4 and {s[0] for s in shapes} >= {"teapot", "hole+bolts plate", "diamond knurl"}
+    name, gt, mesh = shapes[0]                                # cube+cylinder (analytic, exact GT)
+    P, N = E.sample_cloud(mesh, n=400, seed=0)
+    sp = S.fit_shape(_SDFShapeAdapter(gt), P, N, n_init=12, steps=60, n_query=1500, prune_every=0, device="cpu")
+    m = E.proper_metrics(gt, sp, n=6000)                      # continuous, no voxel grid
+    assert 0.0 <= m["iou"] <= 1.0 and np.isfinite(m["vol_err"])
+    props = E.mesh_properties(mesh)
+    assert props["faces"] > 0 and "thinness" in props
+    out = tmp_path / "matrix.png"
+    E.plot_metrics_matrix([dict(name=name, **m, **props)], str(out))
+    assert out.exists()
+
+
+class _SDFShapeAdapter:                                       # expose gt.sdf as a fit_shape `shape`
+    def __init__(self, gt): self.gt = gt
+    def sdf(self, q): return self.gt.sdf(q)
+
+
+def test_render3d_produces_image(tmp_path):
+    from pat import render3d as R3
+    sp = S.fit_shape(_Torus(), *_torus(P_n=400), n_init=10, steps=40, n_query=800, prune_every=0, device="cpu")
+    out = tmp_path / "r.png"
+    R3.render_comparison(_Torus(), sp, str(out), title="t", res=40)   # pyvista if present else shaded mpl
+    assert out.exists() and out.stat().st_size > 1000
+
+
 def test_shard_version_autoregen(tmp_path):
     from pat import teacher_batch as TB
     P, N = _torus(P_n=600)
