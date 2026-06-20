@@ -366,9 +366,9 @@ def fit_and_cache_batch(Ps, Ns, gids, outdir, *, force=False, device="cuda", **k
     """Teacher-fit a batch of meshes (skipping any already cached) and write each shard.  Returns a list
     of ``(gid, status, M, md)`` for the batch (status ``"cached"`` for skipped meshes)."""
     todo = [(P, N, g) for P, N, g in zip(Ps, Ns, gids)
-            if force or not os.path.exists(_T.shard_path(outdir, g))]
+            if force or not _T.shard_is_current(_T.shard_path(outdir, g))]   # regen MISSING or STALE shards
     results = {g: ("cached",) for g in gids if g not in {t[2] for t in todo}}
-    for g in list(results):                                          # backfill M/md for skipped
+    for g in list(results):                                          # backfill M/md for skipped (current) shards
         a = torch.load(_T.shard_path(outdir, g), weights_only=False, map_location="cpu")
         results[g] = ("cached", a["M"], a["md"])
     if todo:

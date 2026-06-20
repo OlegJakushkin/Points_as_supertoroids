@@ -166,7 +166,9 @@ cells.append(md(
 "schedule it keeps the top-ownership splats per mesh, refits ALL meshes together, scores MD per mesh, and",
 "remembers each mesh's smallest field that still met `MD_TARGET` (independently per mesh).  Ground-truth",
 "occupancy is built **hole-respecting from the cached cloud P+N** (no mesh re-download).  Each mesh writes",
-"one shard atomically; already-cached meshes are **skipped**, so it resumes after a Colab disconnect.",
+"one shard atomically; **current-version** shards are skipped (resumes after a disconnect), but shards from",
+"an OLDER teacher pipeline are **automatically regenerated** -- so just re-running this cell upgrades a",
+"stale cache (e.g. shards built before the k-NN-GT / MD-fraction fixes) without deleting anything.",
 ))
 cells.append(code(
 "from pat import teacher_batch as TB",
@@ -179,7 +181,10 @@ cells.append(code(
 "    BATCH_MESHES = TB.auto_batch_size(Pall[0].numpy(), Nall[0].numpy(), m_max=M_MAX, res=RES, device='cuda')",
 "    print('auto-detected safe BATCH_MESHES =', BATCH_MESHES)",
 "have = len(glob.glob(os.path.join(TEACHER_DIR, 'shard_*', 'mesh_*.pt')))",
-"print(f'teacher: {have} shards already cached; target {TOT} | batch {BATCH_MESHES}')",
+"stale = TB._T.count_stale_shards(TEACHER_DIR, list(range(TOT)))   # missing OR old-pipeline -> will regen",
+"print(f'teacher: {have} shards on disk; {stale}/{TOT} missing-or-stale -> will (re)generate '",
+"      f'(pipeline v{TB._T.TEACHER_VERSION}); batch {BATCH_MESHES}')",
+"if stale and have: print('  NOTE: re-generating shards from an older teacher pipeline (k-NN GT + MD-fraction fixes).')",
 "ok = hard = ran = 0; t0 = time.time()",
 "for s in tqdm(range(0, TOT, BATCH_MESHES), desc='teacher (batched)'):",
 "    chunk = list(range(s, min(s + BATCH_MESHES, TOT)))",

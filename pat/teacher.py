@@ -247,11 +247,18 @@ def fit_teacher(P, N, *, n_init=64, md_target=1e-3, iou_ok=0.7, res=64, steps_wa
 # --------------------------------------------------------------------------- #
 #  Per-mesh cached artifact (the student labels) -- sharded, presence-checked, atomic
 # --------------------------------------------------------------------------- #
+# Bump this whenever a teacher change INVALIDATES cached shards, so a re-run auto-regenerates stale ones
+# instead of skipping them.  v2 (2026-06-20): k-NN GT sign vote (was k=1 spiky GT), MD = fraction of cube
+# (was x8 -> pruning never engaged -> M stuck at 104), IoU-feasibility prune + status gate.
+TEACHER_VERSION = 2
+
+
 def teacher_artifact(splat, P, N, md, iou, status, gid):
     """Pack the optimized field + the point->splat grouping into the cached student-label dict."""
     P = np.asarray(P, np.float32); N = np.asarray(N, np.float32)
     resp = splat.surface_ownership(P).detach().cpu()                 # (Npts, M) surface-proximity share
     return {
+        "version": TEACHER_VERSION,
         "gid": int(gid), "M": int(splat.M), "p_max": float(splat.p_max),
         "state": {k: v.cpu() for k, v in splat.state_dict().items()},
         "params": splat.param_rows().detach().cpu().float(),         # (M, ROW_W) FitNet target
@@ -266,6 +273,22 @@ def shard_path(outdir, gid, per_shard=256):
     return os.path.join(outdir, f"shard_{gid // per_shard:04d}", f"mesh_{gid:06d}.pt")
 
 
+def shard_is_current(path):
+    """True iff a shard exists AND was produced by the CURRENT teacher pipeline (``version >=
+    TEACHER_VERSION``).  Stale shards (old/broken pipeline) -> False -> regenerated on re-run."""
+    if not os.path.exists(path):
+        return False
+    try:
+        return int(torch.load(path, weights_only=False, map_location="cpu").get("version", 0)) >= TEACHER_VERSION
+    except Exception:
+        return False
+
+
+def count_stale_shards(outdir, gids):
+    """How many of ``gids`` have a shard that is MISSING or STALE (would be regenerated on re-run)."""
+    return sum(1 for g in gids if not shard_is_current(shard_path(outdir, g)))
+
+
 def save_teacher(artifact, path):
     """Atomic save (.tmp -> os.replace) so an interrupted Colab session loses at most the in-flight mesh."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -278,7 +301,7 @@ def fit_and_cache(P, N, gid, outdir, *, force=False, device="cuda", **kw):
     """Presence-checked teacher fit for one mesh: skip if its shard file already exists (regen only if
     missing or ``force``).  Returns ``(status, M, md)`` -- ``status="cached"`` when skipped."""
     path = shard_path(outdir, gid)
-    if os.path.exists(path) and not force:
+    if shard_is_current(path) and not force:                        # skip only CURRENT-version shards
         a = torch.load(path, weights_only=False, map_location="cpu")
         return "cached", a["M"], a["md"]
     splat, md, iou, status, _ = fit_teacher(P, N, device=device, **kw)

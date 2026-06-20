@@ -106,6 +106,23 @@ def test_fit_teacher_batch_runs():
         assert sp.M >= 4 and np.isfinite(md) and status in ("ok", "hard")
 
 
+def test_shard_version_autoregen(tmp_path):
+    from pat import teacher_batch as TB
+    P, N = _torus(P_n=600)
+    out = str(tmp_path)
+    kw = dict(m_init=10, m_max=20, grow_add=6, max_grow=1, res=32, steps_warm=20, steps_refit=10,
+              keep_schedule=(0.6,), min_keep=4, k_dense=12000, device="cpu")
+    r = TB.fit_and_cache_batch([P], [N], [3], out, **kw)
+    assert r[0][1] in ("ok", "hard")                                # fresh -> generated
+    p = T.shard_path(out, 3)
+    assert torch.load(p, weights_only=False)["version"] == T.TEACHER_VERSION
+    assert TB.fit_and_cache_batch([P], [N], [3], out, **kw)[0][1] == "cached"   # current -> skipped
+    a = torch.load(p, weights_only=False); a["version"] = 0; torch.save(a, p)   # simulate OLD shard
+    assert not T.shard_is_current(p) and T.count_stale_shards(out, [3]) == 1
+    assert TB.fit_and_cache_batch([P], [N], [3], out, **kw)[0][1] != "cached"    # stale -> regenerated
+    assert torch.load(p, weights_only=False)["version"] == T.TEACHER_VERSION
+
+
 def test_groupnet_loss_decreases():
     P, N = _torus(P_n=300)
     # a synthetic 2-cluster owner label the position-aware net can learn
