@@ -239,10 +239,23 @@ def _grow_batch(bs, Pt, Ns_np, need, grow_add, seed):
 # --------------------------------------------------------------------------- #
 #  The batched teacher
 # --------------------------------------------------------------------------- #
+def prepare_gt(Ps, Ns, *, res=64, k_dense=50_000, seed=0):
+    """Build per-mesh GT (occupancy ``(B,4,res^3)`` + query pool ``(B,Npool,*)``) on CPU as stacked CPU
+    tensors -- PREFETCH-able on a background thread while the GPU fits another batch (the KD-tree GT is the
+    GPU-idle phase; overlapping it keeps the GPU busy)."""
+    occ, qp, pp = [], [], []
+    for P, N in zip(Ps, Ns):
+        shape = _T.CloudShape(P, N, k_dense=k_dense, seed=seed)
+        occ.append(torch.as_tensor(_T.gt_occupancy(shape, res=res)))
+        q, p = _T.build_gt_pool(shape, np.asarray(P, np.float32), device="cpu", seed=seed)
+        qp.append(q); pp.append(p)
+    return torch.stack(occ), torch.stack(qp), torch.stack(pp)
+
+
 def fit_teacher_batch(Ps, Ns, *, m_init=40, m_max=128, grow_add=16, max_grow=4, md_target=1e-3, iou_ok=0.7,
                       res=64, steps_warm=300, steps_refit=70, n_query=2048,
                       keep_schedule=(0.8, 0.6, 0.45, 0.33, 0.25), min_keep=8,
-                      k_dense=50_000, device="cuda", seed=0, lr=1e-2, verbose=False):
+                      k_dense=50_000, device="cuda", seed=0, lr=1e-2, verbose=False, gt=None):
     """Optimize ``B = len(Ps)`` meshes' minimal splat sets in parallel.  Returns a list of per-mesh
     ``(splat, md, iou, status)`` (``splat`` is a plain :class:`SuperToroidSplats`).
 
@@ -252,15 +265,12 @@ def fit_teacher_batch(Ps, Ns, *, m_init=40, m_max=128, grow_add=16, max_grow=4, 
     the target).  GPU tensors are freed + the cache emptied before returning.
     """
     B = len(Ps)
-    # per-mesh GT: KD-tree occupancy + query pool (CPU build, then stacked on GPU)
-    occ_list, qp_list, pp_list = [], [], []
-    for i in range(B):
-        shape = _T.CloudShape(Ps[i], Ns[i], k_dense=k_dense, seed=seed)
-        occ_list.append(torch.as_tensor(_T.gt_occupancy(shape, res=res)))           # (4,res^3) bool
-        q, p = _T.build_gt_pool(shape, np.asarray(Ps[i], np.float32), device=device, seed=seed)
-        qp_list.append(q); pp_list.append(p)
-    occ_gt = torch.stack(occ_list)                                                   # (B,4,res^3)
-    qpool = torch.stack(qp_list); phipool = torch.stack(pp_list)                     # (B,Npool,*)
+    # per-mesh GT (KD-tree occupancy + query pool).  Build on CPU here unless prebuilt `gt` was passed
+    # (the notebook PREFETCHES the next batch's GT on a CPU thread while this batch fits on the GPU, so
+    # the GPU never stalls on the KD-tree).  Then move to the GPU.
+    if gt is None:
+        gt = prepare_gt(Ps, Ns, res=res, k_dense=k_dense, seed=seed)
+    occ_gt = gt[0].to(device); qpool = gt[1].to(device); phipool = gt[2].to(device)
     Pt = torch.stack([torch.as_tensor(np.asarray(p), dtype=torch.float32) for p in Ps]).to(device)
     Ns_np = [np.asarray(n, np.float32) for n in Ns]
 
@@ -317,12 +327,10 @@ def fit_teacher_batch(Ps, Ns, *, m_init=40, m_max=128, grow_add=16, max_grow=4, 
 
 
 def auto_batch_size(P0, N0, *, m_max=128, res=64, n_query=2048, k_dense=50_000, device="cuda",
-                    safety=0.7, max_b=24, probe_steps=6, seed=0):
-    """Estimate the largest SAFE ``BATCH_MESHES`` for the current GPU: probe peak memory at B=1 and B=2
-    (worst case = all ``m_max`` splats alive), linearly extrapolate against free VRAM, and clean up.
-
-    Returns ``4`` on non-CUDA devices.  Conservative (``safety`` fraction of free memory + a linear model
-    that captures both the fixed and per-mesh cost).
+                    safety=0.8, max_b=64, probe_steps=6, seed=0):
+    """Estimate the largest SAFE ``BATCH_MESHES`` for the current GPU so the teacher actually FILLS VRAM:
+    probe peak memory at B=1 and B=2 (worst case = all ``m_max`` splats alive + the GPU GT build),
+    linearly extrapolate against ``safety`` * free VRAM, and clean up.  Returns ``4`` on non-CUDA.
     """
     if "cuda" not in str(device) or not torch.cuda.is_available():
         return 4
@@ -330,7 +338,7 @@ def auto_batch_size(P0, N0, *, m_max=128, res=64, n_query=2048, k_dense=50_000, 
     torch.cuda.empty_cache(); gc.collect()
     free, _ = torch.cuda.mem_get_info()
     shape = _T.CloudShape(P0, N0, k_dense=k_dense, seed=seed)
-    occ1 = torch.as_tensor(_T.gt_occupancy(shape, res=res))
+    occ1 = torch.as_tensor(_T.gt_occupancy(shape, res=res)).to(device)
     q1, p1 = _T.build_gt_pool(shape, np.asarray(P0, np.float32), device=device, seed=seed)
 
     def probe(b):

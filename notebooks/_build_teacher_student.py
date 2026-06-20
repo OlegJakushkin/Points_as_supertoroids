@@ -175,7 +175,7 @@ cells.append(code(
 "Pall, Nall = cache['P'], cache['N']",
 "TOT = min(TEACHER_SUBSET, Pall.shape[0])",
 "os.makedirs(TEACHER_DIR, exist_ok=True)",
-"if BATCH_MESHES == 'auto':                       # probe VRAM -> largest safe batch (cleans up after)",
+"if BATCH_MESHES == 'auto':                       # probe VRAM -> largest safe batch so the FIT fills VRAM",
 "    BATCH_MESHES = TB.auto_batch_size(Pall[0].numpy(), Nall[0].numpy(), m_max=M_MAX, res=RES, device='cuda')",
 "    print('auto-detected safe BATCH_MESHES =', BATCH_MESHES)",
 "have = len(glob.glob(os.path.join(TEACHER_DIR, 'shard_*', 'mesh_*.pt')))",

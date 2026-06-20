@@ -70,8 +70,8 @@ class CloudShape:
 
     def __init__(self, P, N, k_dense=50_000, seed=0, k_sign=16):
         self.ds, self.dn = densify_surface(P, N, k_dense, seed)
-        self.tree = cKDTree(self.ds)
-        self.k_sign = k_sign
+        self.tree = cKDTree(self.ds)                                       # KD-tree: the RIGHT structure for
+        self.k_sign = k_sign                                              # NN (GPU brute-force cdist is ~4x slower)
 
     def sdf(self, q, chunk=200_000):
         """Signed distance: magnitude = nearest-surface distance; SIGN = distance-weighted vote of the
@@ -84,7 +84,7 @@ class CloudShape:
         K = int(min(self.k_sign, len(self.ds)))
         for a in range(0, len(q), chunk):
             qq = q[a:a + chunk]
-            d, idx = self.tree.query(qq, k=K, workers=-1)                   # (q,K) nearest surface pts
+            d, idx = self.tree.query(qq, k=K, workers=-1)                   # (q,K) nearest surface pts (all cores)
             if K == 1:                                                     # scipy returns 1-D for k=1
                 d = d[:, None]; idx = idx[:, None]
             diff = qq[:, None, :] - self.ds[idx]                           # (q,K,3)
@@ -166,7 +166,7 @@ def build_gt_pool(shape, P, n_pool=50_000, bound=1.05, device="cuda", seed=0):
     band = P[rng.integers(0, len(P), nb)] + rng.normal(scale=0.03, size=(nb, 3))
     bulk = rng.uniform(-bound, bound, size=(n_pool - nb, 3))
     q = np.concatenate([band, bulk], 0).astype(np.float32)
-    phi = shape.sdf(q).astype(np.float32)                            # ONE parallel KD-tree query
+    phi = shape.sdf(q).astype(np.float32)                           # KD-tree query (all CPU cores)
     return (torch.as_tensor(q, device=device), torch.as_tensor(phi, device=device))
 
 

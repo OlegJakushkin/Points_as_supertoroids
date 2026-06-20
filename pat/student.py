@@ -151,7 +151,8 @@ def group_points(seed, emb, positions, *, nms_radius=0.12, seed_thresh=0.0, max_
     """Turn per-point (seed, emb) into groups: NMS the seeds by 3D radius, then assign every point to
     its nearest seed by 3D POSITION (spatially coherent by construction), with the embedding as a light
     tie-breaker for touching parts.  Returns ``(seed_idx (K,), assign (Npts,))``; K emerges per mesh."""
-    pos = torch.as_tensor(np.asarray(positions), dtype=torch.float32, device=emb.device)
+    pos = (positions.detach().to(emb.device, torch.float32) if torch.is_tensor(positions)
+           else torch.as_tensor(np.asarray(positions), dtype=torch.float32, device=emb.device))
     cand = (seed > seed_thresh).nonzero(as_tuple=True)[0]
     if cand.numel() == 0:
         cand = seed.topk(min(8, seed.numel())).indices
