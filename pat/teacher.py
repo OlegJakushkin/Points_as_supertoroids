@@ -125,6 +125,7 @@ def md_filled_volume(splat, occ_gt, res=128, bound=1.0, device="cuda", return_io
     GT occupancy ``occ_gt (4, res^3)`` (holes respected -- the GT was built hole-aware).  Occupancy is
     the blend sign (:func:`_blend_occ`).  ``return_iou`` also returns the scale-free IoU ``|A&B|/|A|B||``.
     """
+    splat = splat.to(device)                                        # tolerate a CPU-assembled field
     base = grid_centers(res, bound)
     occ_gt_t = torch.as_tensor(np.asarray(occ_gt), device=device)
     vox = (2.0 * bound / res) ** 3
@@ -179,8 +180,8 @@ def grow_at_residual(splat, shape, P, N, add, steps, device, seed=0, q_pool=None
         err = splat.sdf_torch(torch.as_tensor(P, dtype=torch.float32, device=device)).abs().cpu().numpy()
     cand = np.argsort(-err)[:max(add * 8, 64)]                       # worst-fit pool
     pick = _S.farthest_point_sample(P[cand], min(add, len(cand)), seed=seed)
-    new = _S._init_from_coeffs(P, N, cand[pick], np.full(len(pick), 0.18, np.float32))
-    merged = SuperToroidSplats.from_rows(
+    new = _S._init_from_coeffs(P, N, cand[pick], np.full(len(pick), 0.18, np.float32)).to(device)
+    merged = SuperToroidSplats.from_rows(                            # both rows on `device` -> no mismatch
         torch.cat([splat.param_rows(), new.param_rows()], 0), p_max=splat.p_max)
     return _refit(merged, shape, P, steps, device, q_pool=q_pool, phi_pool=phi_pool, n_query=n_query)
 

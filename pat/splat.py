@@ -180,7 +180,8 @@ class SuperToroidSplats(nn.Module):
         ``sdf_torch`` blend, whose sign is unreliable in the interior. The filled-volume Minkowski
         distance is computed against THIS, never the blend.
         """
-        x = torch.as_tensor(np.asarray(x), dtype=torch.float32, device=self.center.device)
+        x = (x.detach().to(self.center.device, torch.float32) if torch.is_tensor(x)
+             else torch.as_tensor(np.asarray(x), dtype=torch.float32, device=self.center.device))
         u, ea, eb, R, r, pt, pr, b = self._params()
         boxc = self.center + self.box_offset.clamp(-1.0, 1.0)
         out = torch.empty(x.shape[0], device=x.device)
@@ -234,8 +235,12 @@ class SuperToroidSplats(nn.Module):
     @classmethod
     def from_rows(cls, rows, p_max=6.0):
         """Assemble a ``SuperToroidSplats`` of ``K`` splats from a ``(K, ROW_W)`` param tensor (the
-        inverse of :meth:`param_rows`; consumes FitNet's decoded rows directly)."""
-        rows = torch.as_tensor(np.asarray(rows), dtype=torch.float32)
+        inverse of :meth:`param_rows`; consumes FitNet's decoded rows directly).  Accepts CPU/CUDA
+        tensors or arrays; the assembled module is on CPU (callers ``.to(device)`` as needed)."""
+        if torch.is_tensor(rows):                                   # avoid np.asarray on a CUDA tensor
+            rows = rows.detach().to(device="cpu", dtype=torch.float32)
+        else:
+            rows = torch.as_tensor(np.asarray(rows), dtype=torch.float32)
         K = rows.shape[0]
         sp = cls(np.zeros((K, 3), np.float32),
                  np.tile([0, 0, 1.0], (K, 1)).astype(np.float32),
