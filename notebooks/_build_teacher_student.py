@@ -125,10 +125,13 @@ cells.append(md(
 ))
 cells.append(code(
 "import json, shutil, urllib.request",
-"if os.path.exists(MESH_CACHE):",
-"    cache = torch.load(MESH_CACHE, weights_only=False)",
-"    print(f'reusing {cache[\"P\"].shape[0]} cached meshes (dense={cache[\"P\"].shape[1]})')",
-"else:",
+"PROG = os.path.join(DRIVE_DIR, 'objxx_progress.json')",
+"parts = [torch.load(MESH_CACHE, weights_only=False)] if os.path.exists(MESH_CACHE) else []",
+"cached = parts[0]['P'].shape[0] if parts else 0",
+"if cached >= MESHES_TARGET:                       # cache already complete -> reuse",
+"    cache = parts[0]",
+"    print(f'reusing {cached} cached meshes (dense={cache[\"P\"].shape[1]})')",
+"else:                                             # build / resume up to MESHES_TARGET",
 "    from pat.datasets import (stratified_sample, build_mesh_cache, objaverse_object_paths, fetch_objaverse_glbs)",
 "    ANN='https://huggingface.co/datasets/cindyxl/ObjaversePlusPlus/resolve/main/annotated_800k.json'",
 "    os.makedirs('data', exist_ok=True)",
@@ -139,10 +142,10 @@ cells.append(code(
 "    hq=[(u,a) for u,a in items if u and int(a.get('score',0))>=MIN_SCORE and not _t(a.get('is_scene',False))]",
 "    style={u:str(a.get('style','?')) for u,a in hq}",
 "    sel=stratified_sample([u for u,_ in hq], total=int(MESHES_TARGET*1.25), min_per_class=3, seed=0, class_of=lambda u:style[u])",
-"    PROG=os.path.join(DRIVE_DIR,'objxx_progress.json'); GLB='data/glb_batch'; BATCH=500",
-"    parts=[torch.load(MESH_CACHE,weights_only=False)] if os.path.exists(MESH_CACHE) else []",
-"    cached=parts[0]['P'].shape[0] if parts else 0",
-"    i=json.load(open(PROG))['idx'] if os.path.exists(PROG) else 0",
+"    GLB='data/glb_batch'; BATCH=500",
+"    # resume the progress marker ONLY if a cache exists to resume (a stale marker without a cache would",
+"    # otherwise skip the whole build loop and leave `cache` undefined).",
+"    i = json.load(open(PROG))['idx'] if (parts and os.path.exists(PROG)) else 0",
 "    opaths=objaverse_object_paths()",
 "    while cached<MESHES_TARGET and i<len(sel):",
 "        batch=sel[i:i+BATCH]; i+=BATCH",
@@ -151,9 +154,13 @@ cells.append(code(
 "        shutil.rmtree(GLB, ignore_errors=True)",
 "        if d is not None:",
 "            parts.append(d); cached+=d['P'].shape[0]",
-"            cache={k:torch.cat([p[k] for p in parts],0) for k in ('P','N','Q','PHI')}",
-"            torch.save(cache, MESH_CACHE); json.dump({'idx':i,'target':MESHES_TARGET}, open(PROG,'w'))",
+"            torch.save({k:torch.cat([p[k] for p in parts],0) for k in ('P','N','Q','PHI')}, MESH_CACHE)",
+"            json.dump({'idx':i,'target':MESHES_TARGET}, open(PROG,'w'))",
 "        print(f'  cached {cached}/{MESHES_TARGET}', flush=True)",
+"    if not os.path.exists(MESH_CACHE):",
+"        raise RuntimeError('no meshes were built (downloads/loads all failed, or the sample was exhausted). '",
+"                           'Check network/Objaverse access; delete objxx_progress.json to restart the sample.')",
+"    cache = torch.load(MESH_CACHE, weights_only=False)   # always (re)load -> `cache` is defined",
 "print('dataset ready:', cache['P'].shape[0], 'meshes')",
 ))
 
@@ -258,6 +265,7 @@ cells.append(md(
 "At inference, NMS over the seeds gives K groups and every point joins its nearest seed (spatially coherent).",
 ))
 cells.append(code(
+"os.makedirs(STUDENT_DIR, exist_ok=True)   # ensure the output dir exists (independent of cell run order)",
 "GN_PATH=os.path.join(STUDENT_DIR,'groupnet.pt')",
 "if os.path.exists(GN_PATH) and not FORCE_STUDENT:",
 "    ck=torch.load(GN_PATH, weights_only=False)",
@@ -279,6 +287,7 @@ cells.append(md(
 "by the teacher's per-splat params via a **geometry-first** loss on the induced single-splat SDF.",
 ))
 cells.append(code(
+"os.makedirs(STUDENT_DIR, exist_ok=True)",
 "FN_PATH=os.path.join(STUDENT_DIR,'fitnet.pt')",
 "if os.path.exists(FN_PATH) and not FORCE_STUDENT:",
 "    ck=torch.load(FN_PATH, weights_only=False)",
@@ -301,6 +310,7 @@ cells.append(md(
 ))
 cells.append(code(
 "from pat import splat as SP",
+"os.makedirs(EVAL_DIR, exist_ok=True)",
 "metrics=[]; start=min(TEACHER_SUBSET, cache['P'].shape[0]); end=min(start+N_EVAL, cache['P'].shape[0])",
 "holdout=list(range(start,end)) if end>start else list(range(max(0,cache['P'].shape[0]-N_EVAL), cache['P'].shape[0]))",
 "for j,gid in enumerate(holdout):",
