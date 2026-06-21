@@ -111,21 +111,30 @@ def _render_slice(ax, sdf_fn, points, axis=2, value=0.0, extent=1.2, res=220,
 def render_comparison(shape, pats, points, out_path, *, slice_axis=2, slice_value=0.0,
                       recon_res=80, recon_bound=1.2, slice_extent=1.2, slice_res=220,
                       neighbors=64, view=(22, -62), suptitle=None, npoints_label=None,
-                      smooth_iters=12, dpi=130):
+                      smooth_iters=12, dpi=130, gt_mesh=None):
     """Render a paper-style comparison and save it to ``out_path``.
 
     Args:
-        shape:  the ground-truth :class:`pat.shapes.Shape` (its ``.sdf`` is GT).
+        shape:  the ground-truth shape; its ``.sdf`` is GT (used for the 2D slice).
         pats:   ordered dict ``{label: PAT}`` of fitted methods (e.g. torus, supertoroid).
         points: the input point cloud ``(N,3)`` to overlay on the slices.
         out_path: PNG path.
+        gt_mesh: the actual ground-truth ``trimesh`` (``.vertices``/``.faces``).  When given,
+            the GT 3D panel draws these triangles **directly** -- the correct, clean GT.  This
+            matters for real (non-watertight) meshes: marching-cubes of their pseudonormal-sign
+            ``.sdf`` produces an exploded spiky blob, NOT the true surface, so always pass the
+            mesh for real data.  ``None`` falls back to marching ``shape.sdf`` (fine for the
+            analytic shapes whose SDF is exact).
     """
     cols = ["ground truth"] + list(pats.keys())
     ncol = len(cols)
     fig = plt.figure(figsize=(3.0 * ncol, 6.2))
 
-    # ground-truth surface + slice
-    gv, gf = _mc(shape.sdf, recon_res, recon_bound)
+    # ground-truth surface (mesh drawn DIRECTLY when provided) + 2D slice from its SDF
+    if gt_mesh is not None:
+        gv, gf = np.asarray(gt_mesh.vertices), np.asarray(gt_mesh.faces)
+    else:
+        gv, gf = _mc(shape.sdf, recon_res, recon_bound)
     ax = fig.add_subplot(2, ncol, 1, projection="3d"); _render_mesh(ax, gv, gf, GT_COLOR, view)
     ax.set_title(cols[0], fontsize=14)
     axs = fig.add_subplot(2, ncol, ncol + 1)

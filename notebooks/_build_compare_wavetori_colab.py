@@ -251,7 +251,7 @@ cells.append(code(
 "    try:",
 "        PR.render_comparison(gt, {'original tori':pat, 'WaveTori':wr}, P,",
 "            os.path.join(EVAL_DIR, f'fig_{name}.png'), recon_res=FIG_RES, recon_bound=1.1,",
-"            suptitle=name, npoints_label=DENSE)",
+"            suptitle=name, npoints_label=DENSE, gt_mesh=gt.mesh)   # draw the GT MESH directly (not MC-of-SDF)",
 "    except Exception as e: print('  fig skip', name, e)",
 "    del pat, wr, vt, ft, vw, fw; free()",
 "json.dump(records, open(os.path.join(EVAL_DIR,'metrics.json'),'w'), indent=1)",

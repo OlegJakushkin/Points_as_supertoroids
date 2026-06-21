@@ -230,3 +230,5 @@ data/
 _paper_text.txt
 *cache*.pt
 assets/_*
+
+paper/
