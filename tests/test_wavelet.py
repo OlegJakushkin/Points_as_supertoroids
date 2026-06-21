@@ -98,9 +98,11 @@ def test_denoiser_residual_init_is_identity():
 def test_train_wavelet_loss_decreases():
     cache = _tiny_cache()
     net, hist = W.train_wavelet(cache, res=16, trunc=0.1, epochs=4, batch=3,
-                                noise_std=0.03, base=8, log_every=0, device="cpu")
+                                noise_std=0.03, base=8, n_val=2, log_every=0, device="cpu")
     assert len(hist) == 4
-    assert min(h["loss"] for h in hist) < hist[0]["loss"]   # the denoiser learns
+    # the held-out VAL denoising error is the proper "it learns" signal (train loss is
+    # noisy with fresh per-step noise on a tiny set); it should improve over training.
+    assert min(h["val"] for h in hist) < hist[0]["val"]
 
 
 def test_wavelet_reconstruction_sdf_and_mesh():
@@ -132,14 +134,33 @@ def test_train_tori_cache_loss_decreases():
 def test_train_tori_cache_survives_nan_batch():
     # a degenerate mesh (NaN in the cloud) must not poison the weights: the proven
     # train_gpu spike/NaN guard skips that batch and the run finishes finite.
+    # n_val=0 keeps every mesh (incl. the poisoned one) in TRAINING so the guard is exercised.
     cache = _tiny_cache(B=8)
     cache["P"][0, 0, 0] = float("nan")                 # poison one mesh's cloud
     net, hist = C.train_tori_cache(cache, k=12, epochs=2, batch=2, n_points=200,
-                                   noise_std=0.0, d_embed=32, n_layers=2,
+                                   noise_std=0.0, d_embed=32, n_layers=2, n_val=0,
                                    log_every=0, device="cpu", seed=1)
     assert sum(h["skipped"] for h in hist) >= 1        # the poisoned batch was skipped
     assert np.isfinite(hist[-1]["loss"])               # running loss never went NaN
     assert all(torch.isfinite(p).all() for p in net.parameters())   # weights stayed finite
+
+
+def test_best_by_val_selection_loads_best_weights():
+    # the trainer must hold out a val slice, snapshot the best-by-val epoch, and RETURN
+    # those weights -> re-measuring val on the returned net reproduces the best val.
+    cache = _tiny_cache(B=10)
+    net, hist = C.train_tori_cache(cache, k=12, epochs=4, batch=2, n_points=150,
+                                   noise_std=0.01, d_embed=32, n_layers=2, n_val=3,
+                                   log_every=0, device="cpu", seed=0)
+    vals = [h["val"] for h in hist]
+    assert all(np.isfinite(v) for v in vals)
+    best = min(vals)
+    # reconstruct the exact held-out split the trainer used (seed=0) and recompute
+    perm = torch.randperm(10, generator=torch.Generator().manual_seed(0))
+    val_idx = perm[:3]
+    re = C.tori_val_error(net, cache["P"], cache["N"], cache["Q"], cache["PHI"], val_idx,
+                          k=12, n_points=150, noise_std=0.01, device="cpu", seed=0)
+    assert abs(re - best) < 1e-4                        # returned net == best-by-val weights
 
 
 def test_head_to_head_runs(tmp_path):
@@ -155,5 +176,42 @@ def test_head_to_head_runs(tmp_path):
     for key in ("tori", "wavelet"):
         m = res[key]
         assert 0.0 <= m["iou"] <= 1.0
+        assert 0.0 <= m["md"] <= 1.0                    # the splat-teacher filled-volume loss
         assert np.isfinite(m["vol_err"]) and np.isfinite(m["chamfer"])
     assert out.exists() and out.stat().st_size > 1000
+
+
+def test_wavetori_blend_train_reconstruct():
+    # WaveTori: tori-blend prior is a valid TSDF; the refiner trains (best-by-val) and
+    # WaveToriReconstruction is a drop-in (sdf/reconstruct accept & ignore extra kwargs).
+    from pat import wavetori as WT
+    from pat.model import CoeffNet
+    cache = _tiny_cache(B=6)
+    tori = CoeffNet(d_embed=32, n_layers=2)                 # untrained prior is fine for plumbing
+    prior = WT.tori_blend_tsdf(cache["P"][:2], cache["N"][:2], tori, res=16, trunc=0.1, device="cpu")
+    assert prior.shape == (2, 1, 16, 16, 16)
+    assert prior.min() >= -0.1 - 1e-6 and prior.max() <= 0.1 + 1e-6
+    wave, hist = WT.train_wavetori(cache, tori, res=16, trunc=0.1, epochs=3, batch=2, base=8,
+                                   k=12, n_val=2, device="cpu", log_every=0)
+    assert len(hist) == 3 and all(np.isfinite(h["val"]) for h in hist)
+    P, N = _torus_cloud(800, 0.55, 0.2, 0)
+    wr = WT.WaveToriReconstruction(P, N, tori, wave, res=16, trunc=0.1, device="cpu", k=12)
+    assert wr.sdf(np.array([[0.0, 0.0, 0.0]]), neighbors=64).shape == (1,)   # ignores neighbors
+    v, f = wr.reconstruct(res=99, bound=2.0, neighbors=64)                   # extra kwargs ignored
+    assert v is not None and len(f) > 0
+
+
+def test_proper_metrics_md_is_splat_teacher_filled_volume():
+    # md must equal the splat teacher's MD = vol(A xor B)/vol(cube). Build A=left half,
+    # B=bottom half over [-1,1]^3: their symmetric-difference fraction is exactly 0.5.
+    from pat import eval3d as E
+
+    class _GT:
+        def contains(self, q): return np.asarray(q)[:, 0] < 0      # left half-space inside
+
+    class _Pred:
+        def sdf(self, q): return np.asarray(q)[:, 1]               # bottom half-space (sdf<0) inside
+
+    m = E.proper_metrics(_GT(), _Pred(), n=60000, seed=0)
+    assert abs(m["md"] - 0.5) < 0.02
+    assert abs(m["iou"] - 1.0 / 3.0) < 0.02                         # |A&B|/|A|B|| = 0.25/0.75

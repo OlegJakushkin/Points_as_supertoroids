@@ -34,6 +34,8 @@ drops straight into :mod:`pat.eval3d` and :mod:`pat.render3d`.
 
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -293,11 +295,38 @@ def wavelet_loss(pred, clean, c_pred=None, c_clean=None, lam_wave=1.0, lam_grad=
 # --------------------------------------------------------------------------- #
 #  Training over the dense {P, N, ...} cache
 # --------------------------------------------------------------------------- #
+@torch.no_grad()
+def wavelet_val_error(net, P, N, val_idx, *, res, trunc, bound, noise_std,
+                      device="cpu", mb=8, seed=0):
+    """Mean held-out TSDF denoising error over ``val_idx`` meshes (no grad).
+
+    For each validation mesh builds the clean + a **fixed-noise** noisy TSDF, runs
+    the denoiser, and returns ``mean |pred − clean|`` (normalized TSDF scale) — the
+    model-selection metric.  Returns ``inf`` if nothing finite was measured.
+    """
+    net.eval()
+    gv = torch.Generator().manual_seed(seed)
+    tot, cnt = 0.0, 0
+    for s in range(0, len(val_idx), mb):
+        idx = val_idx[s:s + mb]
+        Pc = P[idx]; Nc = N[idx]
+        noise = torch.randn(Pc.shape, generator=gv) * noise_std
+        clean = tsdf_from_clouds(Pc.to(device), Nc.to(device), res, trunc, bound, device) / trunc
+        noisy = tsdf_from_clouds((Pc + noise).to(device), Nc.to(device), res, trunc, bound, device) / trunc
+        pred, _, _ = net(noisy)
+        err = (pred - clean).abs().mean()
+        if torch.isfinite(err):
+            tot += float(err) * len(idx); cnt += len(idx)
+    net.train()
+    return tot / cnt if cnt else float("inf")
+
+
 def train_wavelet(cache, *, res: int = 32, trunc: float = 0.1, bound: float = 1.1,
                   epochs: int = 4, batch: int = 8, n_points: int | None = None,
                   noise_std: float = 0.015, lr: float = 1e-3, lam_wave: float = 1.0,
                   lam_grad: float = 0.1, device="cpu", subset: int | None = None,
-                  base: int = 32, log_every: int = 50, seed: int = 0, net=None):
+                  base: int = 32, n_val: int | None = None, log_every: int = 50,
+                  seed: int = 0, net=None):
     """Train a :class:`WaveletDenoiser` on noisy→clean TSDF pairs from a mesh cache.
 
     For every mesh in ``cache`` (a dict of ``P (A,Npts,3)``, ``N (A,Npts,3)`` CPU
@@ -308,7 +337,13 @@ def train_wavelet(cache, *, res: int = 32, trunc: float = 0.1, bound: float = 1.
 
     then supervises the network to map noisy → clean (plus the wavelet/gradient
     terms).  Fresh noise every step is the denoising signal.  Returns
-    ``(net, history)`` where ``history`` is a list of per-epoch loss dicts.
+    ``(net, history)`` (per-epoch loss / val dicts).
+
+    **Best-by-validation selection.**  A fixed random slice of ``n_val`` meshes is
+    held out; after each epoch the held-out TSDF denoising error is measured
+    (:func:`wavelet_val_error`) and the **best-by-val** weights are snapshotted.  The
+    returned net is loaded with those best weights, so saving it persists the best
+    epoch (pass ``n_val=0`` to keep the final weights).
 
     ``n_points`` optionally subsamples each cloud per step (``None`` = use all
     cached points); ``subset`` caps the number of meshes (``None`` = all).
@@ -320,14 +355,24 @@ def train_wavelet(cache, *, res: int = 32, trunc: float = 0.1, bound: float = 1.
     net = net or WaveletDenoiser(base=base).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=lr)
     haar = haar_filters_3d(device)
-    g = torch.Generator().manual_seed(seed)          # CPU generator (cache is on CPU)
+
+    g0 = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(A, generator=g0)
+    if n_val is None:
+        n_val = min(256, max(1, A // 5))
+    n_val = max(0, min(int(n_val), A - 1)) if A > 1 else 0
+    val_idx = perm[:n_val]
+    train_pool = perm[n_val:]
+
+    g = torch.Generator().manual_seed(seed + 1)      # CPU generator (cache is on CPU)
     hist = []
+    best_val, best_ep, best_state = float("inf"), -1, None
     net.train()
     for ep in range(epochs):
-        order = torch.randperm(A, generator=g).tolist()
+        tr = train_pool[torch.randperm(len(train_pool), generator=g)]
         run, nb, skipped = 0.0, 0, 0
-        for s in range(0, A, batch):
-            idx = torch.as_tensor(order[s:s + batch])
+        for s in range(0, len(tr), batch):
+            idx = tr[s:s + batch]
             Pc = P[idx]; Nc = N[idx]                 # (b, dense, 3) on CPU
             if n_points is not None and n_points < dense:
                 sub = torch.argsort(torch.rand(len(idx), dense, generator=g), 1)[:, :n_points]
@@ -353,11 +398,19 @@ def train_wavelet(cache, *, res: int = 32, trunc: float = 0.1, bound: float = 1.
             opt.step()
             run += parts["loss"]; nb += 1
             if log_every and nb % log_every == 0:
-                print(f"  wavelet ep{ep} {min(s + batch, A)}/{A} loss {run / nb:.4f}",
+                print(f"  wavelet ep{ep} {min(s + batch, len(tr))}/{len(tr)} loss {run / nb:.4f}",
                       flush=True)
-        hist.append({"epoch": ep, "loss": run / max(nb, 1), "skipped": skipped})
-        print(f"wavelet epoch {ep}: loss {run / max(nb, 1):.4f} | skipped {skipped} bad steps",
-              flush=True)
+        val = (wavelet_val_error(net, P, N, val_idx, res=res, trunc=trunc, bound=bound,
+                                 noise_std=noise_std, device=device, seed=seed) if n_val else float("nan"))
+        hist.append({"epoch": ep, "loss": run / max(nb, 1), "val": val, "skipped": skipped})
+        if n_val and val < best_val:
+            best_val, best_ep = val, ep
+            best_state = copy.deepcopy({kk: vv.detach().cpu() for kk, vv in net.state_dict().items()})
+        print(f"wavelet epoch {ep}: loss {run / max(nb, 1):.4f} | val {val:.4f} | "
+              f"skipped {skipped} bad steps", flush=True)
+    if best_state is not None:                        # restore the best-by-val weights
+        net.load_state_dict(best_state)
+        print(f"wavelet: selected BEST epoch {best_ep} (val {best_val:.4f})", flush=True)
     return net, hist
 
 

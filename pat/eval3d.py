@@ -189,7 +189,13 @@ def sample_cloud(mesh, n=1536, noise=0.0, seed=0):
 # --------------------------------------------------------------------------- #
 def proper_metrics(gt, splat, *, n=120_000, bound=1.0, seed=0, chunk=40_000):
     """Continuous IoU / volume on BOTH sides: GT occupancy from ``gt.contains`` (exact / library), pred
-    from ``splat.sdf < 0`` -- sampled Monte-Carlo, NO voxel grid.  Returns a metrics dict."""
+    from ``splat.sdf < 0`` -- sampled Monte-Carlo, NO voxel grid.  Returns a metrics dict.
+
+    Includes ``md`` -- the **Minkowski filled-volume distance** ``vol(A xor B)/vol(cube)`` that the
+    supertoroid-splat teacher minimizes (:func:`pat.teacher.md_filled_volume`), i.e. the fraction of the
+    cube where the reconstructed solid and the GT solid disagree (lower is better; 0 = identical solids).
+    Here it is the **voxel-free** Monte-Carlo estimate (continuous on both sides), so any model exposing
+    ``.sdf`` -- splats, tori, or the wavelet denoiser -- is judged by the same filled-volume loss."""
     rng = np.random.default_rng(seed)
     pts = rng.uniform(-bound, bound, (n, 3)).astype(np.float32)
     g = np.zeros(n, bool); pr = np.zeros(n, bool)
@@ -199,6 +205,7 @@ def proper_metrics(gt, splat, *, n=120_000, bound=1.0, seed=0, chunk=40_000):
         pr[s] = np.asarray(splat.sdf(pts[s])) < 0
     inter = int((g & pr).sum()); union = int((g | pr).sum()); cube = (2 * bound) ** 3
     return dict(iou=inter / max(union, 1),
+                md=(union - inter) / n,                  # vol(A xor B)/vol(cube) -- the splat-teacher MD loss
                 vol_gt=g.mean() * cube, vol_pred=pr.mean() * cube,
                 vol_err=abs(int(pr.sum()) - int(g.sum())) / n * cube,
                 precision=inter / max(int(pr.sum()), 1), recall=inter / max(int(g.sum()), 1))
