@@ -24,8 +24,12 @@ def run(ckpt):
     return out
 
 
+# v2 trades clean-SDF accuracy for robustness, so the best-by-clean-SDF checkpoint may never beat v1 and is
+# never written -- fall back to the latest (de-floatered) v2 model, which is the one we actually want to judge.
+V2 = "assets/waveshape_mixed_v2.pt" if os.path.exists("assets/waveshape_mixed_v2.pt") else "assets/waveshape_mixed_v2_latest.pt"
+print(f"v1 = assets/waveshape_mixed.pt   v2 = {V2}\n", flush=True)
 a = run("assets/waveshape_mixed.pt")
-b = run("assets/waveshape_mixed_v2.pt")
+b = run(V2)
 print(f"{'shape':8s} | {'parts v1->v2':14s} | {'F clean':12s} | {'F @3% noise':13s} | {'F @256pts':12s} | {'sdf-err':12s}")
 for s in OPEN + CLOSED:
     print(f"{s:8s} | {a[s]['parts']:4d} -> {b[s]['parts']:<4d}   | {a[s]['F']:4.0f} -> {b[s]['F']:<4.0f} | "
