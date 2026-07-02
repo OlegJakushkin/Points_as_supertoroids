@@ -55,6 +55,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--cap", type=int, default=0)
+    ap.add_argument("--sparse", default="data/se_clouds.pt", help="sparse INPUT/anchor cloud cache")
     ap.add_argument("--dense", default="data/se_clouds_dense.pt", help="aligned DENSE cloud cache (target source)")
     ap.add_argument("--target", choices=["dense", "anchor"], default="dense",
                     help="dense = GT-like detailed field (earn-its-keep); anchor = old circular target (baseline)")
@@ -75,7 +76,7 @@ def main():
         from train import make_solids
         P, N = make_solids(24); Pd, Nd = P, N                      # smoke: dense==sparse (aligned); only exercises plumbing
     else:
-        blob = torch.load("data/se_clouds.pt", weights_only=False)
+        blob = torch.load(a.sparse, weights_only=False)
         P, N = blob["P"], blob["N"]; assert P.shape[1] == DENSE
         assert os.path.exists(a.dense), f"dense cloud cache {a.dense} missing (build it in the notebook, aligned to se_clouds.pt order)"
         db = torch.load(a.dense, weights_only=False)
