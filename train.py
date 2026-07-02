@@ -169,9 +169,17 @@ def main():
     net = WV.PerceiverWaveNet(with_seg=with_seg, res=res, trunc=trunc, bound=bound, field_mode=base).to(dev)
     best = float("inf"); start_ep = 0
     if a.resume and os.path.exists(a.resume):
-        ck = torch.load(a.resume, weights_only=False); net.load_state_dict(ck["state"])
-        best = ck.get("val_sdferr", float("inf")); start_ep = int(ck.get("epoch", 0))
-        print(f"resumed from {a.resume} (continuing at epoch {start_ep+1}, best val {best:.4f})", flush=True)
+        ck = torch.load(a.resume, weights_only=False)
+        if ck.get("composed"):                               # SAME recipe -> continue (weights + epoch + best)
+            state = {k: v for k, v in ck["state"].items() if k != "qpos"}   # qpos res-dependent -> recomputed
+            miss = net.load_state_dict(state, strict=False)  # tolerant of schema drift (e.g. edge_refiner added)
+            best = ck.get("val_sdferr", float("inf")); start_ep = int(ck.get("epoch", 0))
+            print(f"resumed composed ckpt {a.resume} (missing {len(miss.missing_keys)}, unexpected "
+                  f"{len(miss.unexpected_keys)}): continue at epoch {start_ep+1}, best val {best:.4f}", flush=True)
+        else:                                                # old/foreign ckpt (e.g. the shipped pre-composed
+            print(f"WARNING: {a.resume} is NOT a region-composed checkpoint -> IGNORING it and training from "
+                  f"scratch (the composed anchor needs identity-start heads; warm-starting old weights hurts).",
+                  flush=True)                                #   waveshape*.pt) -> ignore, train fresh
     # bf16 autocast (memory ~halves -> bigger batch) + 8-bit Adam (bitsandbytes) with graceful fallback
     bf16 = (not a.no_bf16) and torch.cuda.is_bf16_supported()
     try:
