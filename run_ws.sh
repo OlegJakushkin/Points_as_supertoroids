@@ -2,6 +2,9 @@
 # Resilient waveshape trainer (region-composed recipe): AUTO-RESUME from the latest checkpoint on every
 # (re)start, retry on crash, park when done.  Run under `docker run --restart unless-stopped` so a host
 # reboot -> Docker Desktop autostart -> container restart -> this script resumes at the stored epoch.
+# expandable_segments avoids allocator fragmentation on the long run (per-step empty_cache() was removed and
+# the composed-field allocations vary per shape as region counts differ).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /work
 conda run -n fvdb pip install -q matplotlib bitsandbytes 2>&1 | tail -1
 while [ ! -f assets/waveshape.done ]; do
