@@ -29,7 +29,7 @@ from waveshape import wavelet as WV, eval3d as E
 from waveshape.shapes import normalize_to_unit_cube
 
 dev = "cuda"; bound = 1.1; RES = 64; TRUNC = 0.1; DENSE = 1536   # TRAIN lattice (coeff base r=32 -> enough edge signal for the refiner); net is res-free (query any res)
-EVAL_RES = 128                                     # ALWAYS eval/render/select at 128^3 (res-free query of the 42^3-trained net)
+EVAL_RES = 128                                     # ALWAYS eval/render/select at 128^3 (res-free query of the 64^3-trained net)
 EVAL_CAP = 16                                      # clean-val shapes scored at 128^3 (B=1; dense 128^3 decode is heavy)
 NOISE_LO, NOISE_HI = 0.0, 0.20     # input-noise range: draw 0 = CLEAN, draw 1 = per-sample U[0,0.2] (robustness 0-20%)
 DRAWS = 2; LR = 2e-3; BASE = 40; SEED = 0; NVAL = 4; CLEAN_SAMPLE = 128

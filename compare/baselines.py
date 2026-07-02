@@ -17,8 +17,25 @@ def _o3d_pcd(P, N):
     return pcd, o3d
 
 
+def _ml_meshset(P, N):
+    import pymeshlab as ml
+    ms = ml.MeshSet()
+    ms.add_mesh(ml.Mesh(vertex_matrix=np.asarray(P, np.float64), v_normals_matrix=np.asarray(N, np.float64)))
+    return ms
+
+
 def recon_spsr(P, N, depth=8, density_q=0.04):
-    pcd, o3d = _o3d_pcd(P, N)
+    # open3d has no cp313 wheels; pymeshlab wraps the SAME original screened-Poisson code (Kazhdan 2013),
+    # so fall back to it rather than skipping the method.  (No density-trim there -> classic untrimmed SPSR.)
+    try:
+        pcd, o3d = _o3d_pcd(P, N)
+    except ImportError:
+        ms = _ml_meshset(P, N)
+        t = time.time()
+        ms.generate_surface_reconstruction_screened_poisson(depth=depth)
+        dt = time.time() - t
+        m = ms.current_mesh()
+        return np.asarray(m.vertex_matrix()), np.asarray(m.face_matrix()), dt
     t = time.time()
     mesh, dens = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth)
     dens = np.asarray(dens)
@@ -28,7 +45,15 @@ def recon_spsr(P, N, depth=8, density_q=0.04):
 
 
 def recon_bpa(P, N):
-    pcd, o3d = _o3d_pcd(P, N)
+    try:
+        pcd, o3d = _o3d_pcd(P, N)
+    except ImportError:
+        ms = _ml_meshset(P, N)                                   # MeshLab ball-pivoting (Bernardini 1999)
+        t = time.time()
+        ms.generate_surface_reconstruction_ball_pivoting()
+        dt = time.time() - t
+        m = ms.current_mesh()
+        return np.asarray(m.vertex_matrix()), np.asarray(m.face_matrix()), dt
     d = np.asarray(pcd.compute_nearest_neighbor_distance()); r = float(np.mean(d))
     t = time.time()
     mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
@@ -82,19 +107,20 @@ def recon_rimls(P, N): return _pymeshlab_recon(P, N, "RIMLS")   # Robust Implici
 # reimplement methods.  Research methods without a drop-in public Python library (SHM/signed-heat, SSPD, SHC,
 # NN-VIPSS, regularized winding number) are likewise omitted rather than faked.
 METHODS = {
-    "SPSR":  (recon_spsr,  "open3d"),
-    "BPA":   (recon_bpa,   "open3d"),
-    "APSS":  (recon_apss,  "pymeshlab"),
-    "RIMLS": (recon_rimls, "pymeshlab"),
+    "SPSR":  (recon_spsr,  ("open3d", "pymeshlab")),   # either library provides the algorithm
+    "BPA":   (recon_bpa,   ("open3d", "pymeshlab")),
+    "APSS":  (recon_apss,  ("pymeshlab",)),
+    "RIMLS": (recon_rimls, ("pymeshlab",)),
 }
 
 
 def available():
     import importlib
     out = {}
-    for name, (fn, mod) in METHODS.items():
-        try:
-            importlib.import_module(mod); out[name] = fn
-        except Exception:
-            pass
+    for name, (fn, mods) in METHODS.items():
+        for mod in (mods if isinstance(mods, tuple) else (mods,)):
+            try:
+                importlib.import_module(mod); out[name] = fn; break
+            except Exception:
+                pass
     return out

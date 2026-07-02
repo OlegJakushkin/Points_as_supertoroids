@@ -1,1 +1,7 @@
-{"run": "local", "model": "waveshape_mixed.pt (v1, stable)", "val_k": 2, "host": "RTX 3080 8GB"}
+{
+ "run": "local",
+ "model": "waveshape.pt (region-composed, Colab A100, best ep1)",
+ "val_k": 2,
+ "host": "RTX 3080 8GB laptop, SPSR/BPA via pymeshlab (untrimmed SPSR)",
+ "date": "2026-07-02"
+}

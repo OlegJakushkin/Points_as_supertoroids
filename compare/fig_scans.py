@@ -46,7 +46,7 @@ def _defect_label(v, f):
     d = mesh_defects(v, f)
     sx = d["self_intersections"]
     sx_txt = "?" if sx < 0 else f"{sx}"                          # -1 == pymeshlab unavailable
-    return f"{d['components']} parts\\n{sx_txt} self-X"
+    return f"{d['components']} parts\n{sx_txt} self-X"
 
 
 fig = plt.figure(figsize=(2.05 * len(cols), 2.25 * len(kinds)))
