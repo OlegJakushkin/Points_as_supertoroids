@@ -174,7 +174,7 @@ def fscore_curve(v, f, gt, taus=(0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1), n=3
         p = float((da < t).mean()); r = float((db < t).mean())
         curve[float(t)] = 2 * p * r / (p + r + 1e-9) * 100
     ta = np.array(sorted(curve)); vals = np.array([curve[t] for t in ta])
-    auc = float(np.trapz(vals, ta) / (ta[-1] - ta[0]))
+    auc = float(getattr(np, "trapezoid", getattr(np, "trapz", None))(vals, ta) / (ta[-1] - ta[0]))
     return curve, auc
 
 
