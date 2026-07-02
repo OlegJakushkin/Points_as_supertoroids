@@ -15,13 +15,16 @@ _mixed = None
 _tori = None
 
 
-MIXED_CKPT = os.environ.get("MIXED_CKPT", "assets/waveshape_mixed.pt")     # set to ..._v2.pt to benchmark the retrained model
+MIXED_CKPT = os.environ.get("MIXED_CKPT", "assets/waveshape.pt")     # region-composed release checkpoint
+
+_mixed_fm = "mixed"
 
 
 def mixed_net():
-    global _mixed
+    global _mixed, _mixed_fm
     if _mixed is None:
         ck = torch.load(MIXED_CKPT, weights_only=False)
+        _mixed_fm = ck.get("field_mode") or ("unsigned" if ck.get("unsigned") else "signed")
         _mixed = WV.load_at_res(ck, res=128, bound=BOUND).to(DEV).eval()   # resolution-free: query fine, fair to mesh baselines
     return _mixed
 
@@ -89,11 +92,12 @@ def recon_ours(P, N):
     Pt = torch.tensor(P[None]).float().to(DEV); Nt = torch.tensor(N[None]).float().to(DEV)
     t = time.time()
     with torch.no_grad():
-        g = WV._smooth_grid(net(Pt, Nt)[0][0, 0].cpu().numpy() * TRUNC, 0.5)
-    if not (g.min() < 0 < g.max()):
+        raw = net(Pt, Nt)[0][0, 0].cpu().numpy() * TRUNC
+    # canonical always-on meshing recipe (same as render_suite/generate): mode-aware dynamic-eps level
+    # selection + floater collapse -- benchmark what we ship, not a raw marching-cubes shortcut.
+    v, f = WV.mesh_field(raw, _mixed_fm, bound=BOUND, trunc=TRUNC)
+    if v is None or f is None or not len(f):
         return None, None, time.time() - t
-    v, f, _, _ = measure.marching_cubes(g.astype(np.float64), 0.0)
-    v = v / (g.shape[0] - 1) * (2 * BOUND) - BOUND
     if os.environ.get("OURS_CLEANUP"):
         v, f = _cleanup_mesh(v, f)
     return v, f, time.time() - t

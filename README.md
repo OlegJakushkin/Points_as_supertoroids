@@ -29,7 +29,7 @@ docker compose build                                              # one-time
 docker compose run --rm generate --shape bunny --out out/bunny.obj
 ```
 
-The released checkpoint is `assets/waveshape_mixed.pt`; output meshes land in `out/` on the host.
+The released checkpoint is `assets/waveshape.pt`; output meshes land in `out/` on the host.
 
 ### The examples
 
@@ -72,7 +72,7 @@ plus `--out PATH`, `--region`, `--superres`, `--res N` (output lattice, default 
 | `waveshape/`  | the model package — `wavelet.py` (the `PerceiverWaveNet` + `load_at_res` + meshing), plus the geometry support it needs. Self-contained: numpy + torch. |
 | `generate.py` | the CLI above: points / mesh (+ optional region box) → mesh. |
 | `train.py`    | train the model on ModelNet40 (see below). |
-| `assets/`     | the released checkpoint `waveshape_mixed.pt` + the example inputs (bunny, teapot, one ModelNet chair). |
+| `assets/`     | the released checkpoint `waveshape.pt` + the example inputs (bunny, teapot, one ModelNet chair). |
 | `paper/`      | the paper — `paper2.tex` / `paper2.pdf` (+ figures). Build with `sh paper/render.sh`. |
 | `tori/`       | the original **Points-as-Tori** model (the baseline we compare against), isolated and runnable — see [`tori/README.md`](tori/README.md). |
 | `wavescene/`  | a separate monocular-image → 3D-scene model (its own project; kept here for convenience). |
@@ -84,7 +84,7 @@ plus `--out PATH`, `--region`, `--superres`, `--res N` (output lattice, default 
 Training needs `data/ModelNet40/` on the host. The unified mixed-base model:
 
 ```bash
-docker compose run --rm train --base mixed --out waveshape_mixed --region --epochs 6
+docker compose run --rm train --base mixed --out waveshape --epochs 16
 ```
 
 `--base {signed,unsigned,mixed}` selects the field the model is anchored on and trained toward; `--region`

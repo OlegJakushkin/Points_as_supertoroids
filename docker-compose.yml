@@ -2,7 +2,7 @@
 #
 #   docker compose build
 #   docker compose run --rm generate --shape bunny --out out/bunny.obj
-#   docker compose run --rm train --base mixed --out waveshape_mixed --epochs 6
+#   docker compose run --rm train --base mixed --out waveshape --epochs 16
 #
 # Requires the NVIDIA Container Toolkit on the host.  The repo is bind-mounted at /workspace,
 # so inputs in assets/ and outputs in out/ live on the host.
@@ -31,7 +31,7 @@ services:
     entrypoint: ["python", "generate.py"]
 
   # train the unified mixed-base model on ModelNet40 (expects data/ModelNet40/).  Append train.py flags:
-  #   docker compose run --rm train --base mixed --out waveshape_mixed --epochs 6
+  #   docker compose run --rm train --base mixed --out waveshape --epochs 16
   train:
     <<: *gpu
     entrypoint: ["python", "train.py"]

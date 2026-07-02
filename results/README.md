@@ -11,7 +11,7 @@ Each `results/<run>/` holds one measurement run, **same schema** for host and Co
 | `meta.json` | (written per run) | `{run, model, date, val_k}` |
 
 **Runs**
-- `local/` — produced on this host, current checkpoint (`waveshape_mixed_v2_latest.pt`).
+- `local/` — produced on this host, current checkpoint (`waveshape.pt`, region-composed, Colab A100-trained).
 - `colab/` — download your Colab `DRIVE_WS/results` folder and drop it in here as `results/colab/`.
 
 **Compose:** `python compose.py` → `results/comparison.md` — the reviewer quantitative table, with the fixed

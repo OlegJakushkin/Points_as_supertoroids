@@ -248,3 +248,7 @@ paper/*.synctex.gz
 
 paper/
 baselines_ext/scans/raw/
+
+# transient render workspace + colab result drops (weights promoted to assets/)
+renders/latest/
+colab-trained/*.pt

@@ -111,7 +111,7 @@ def main():
     ap.add_argument("--out", required=True, help="output mesh path (.obj/.ply/.stl)")
     ap.add_argument("--region", action="store_true", help="reconstruct ONE box region (in the full pass)")
     ap.add_argument("--superres", action="store_true", help="super-resolve that box (box-normalised + context)")
-    ap.add_argument("--ckpt", default="assets/waveshape_mixed.pt", help="model checkpoint")
+    ap.add_argument("--ckpt", default="assets/waveshape.pt", help="model checkpoint")
     ap.add_argument("--res", type=int, default=64, help="marching-cubes output lattice (R^3); 48 for region demos")
     ap.add_argument("--n", type=int, default=8000, help="points to sample from a mesh")
     ap.add_argument("--seed", type=int, default=0)
