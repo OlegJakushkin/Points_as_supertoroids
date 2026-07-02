@@ -157,6 +157,10 @@ def tsdf_from_clouds(Ps, Ns, res: int = 32, trunc: float = 0.1, bound: float = 1
     grid = torch.stack(torch.meshgrid(lin, lin, lin, indexing="ij"), -1).reshape(-1, 3)
     G = grid.shape[0]
     out = torch.empty(B, G, device=device)
+    # ADAPTIVE chunk: the memory is B*chunk*Npts floats, so bound that (~256 MB) rather than a fixed grid
+    # chunk -- for the SMALL per-region clouds (Npts ~ 250) the whole grid fits in ONE cdist, collapsing the
+    # per-region 64/512 tiny-kernel python loop (region-composed anchor was launch-latency bound) to 1-2 launches.
+    qchunk = min(G, max(qchunk, 16_000_000 // max(B * Ps.shape[1], 1)))
     for a in range(0, G, qchunk):
         gq = grid[a:a + qchunk]                      # (q, 3)
         d = torch.cdist(gq.unsqueeze(0).expand(B, -1, -1), Ps)   # (B, q, Npts)
@@ -251,9 +255,10 @@ def tsdf_composed(P, N, lab, res: int = 32, trunc: float = 0.1, bound: float = 1
     if thin is None:                                                 # (n,) per-point thin gate (cacheable)
         thin = point_thinness(P[None], N[None])[0]
     thin = torch.as_tensor(thin, device=device)
+    lab_t = torch.as_tensor(np.asarray(lab), device=device).long()   # labels on GPU (no per-region numpy/sync)
     fields, is_u = [], []
     for r in range(R):
-        sel = torch.as_tensor(lab == r, device=device)
+        sel = lab_t == r
         u = bool(thin[sel].float().mean() > thin_tau)                # region S/UDF selection (dynamic)
         f = tsdf_from_clouds(P[sel][None], N[sel][None], res, trunc, bound, device,
                              mode="unsigned" if u else "signed")[0, 0]
@@ -297,7 +302,7 @@ def tsdf_composed(P, N, lab, res: int = 32, trunc: float = 0.1, bound: float = 1
     pieces = []
     multi = len(roots) > 1
     for m in roots.values():
-        sel = torch.as_tensor(np.isin(lab, m), device=device)
+        sel = torch.isin(lab_t, torch.as_tensor(m, device=device))   # GPU membership (was np.isin -> CPU + sync)
         Pp, Np = P[sel], N[sel]
         lo = Pp.amin(0); hi = Pp.amax(0); ext = (hi - lo).clamp_min(1e-6)
         # OPEN pieces get an UNSIGNED band shell instead of a signed half-space fill: (a) FLAT piece = an open
@@ -319,8 +324,9 @@ def tsdf_composed(P, N, lab, res: int = 32, trunc: float = 0.1, bound: float = 1
             thr = torch.maximum(0.05 * ext.norm(), 2.0 * nn_med).clamp_min(3.0 * bound / res)
             gq = grid.reshape(-1, 3)
             far = torch.empty(gq.shape[0], dtype=torch.bool, device=device)
-            for a0 in range(0, gq.shape[0], 8192):
-                far[a0:a0 + 8192] = torch.cdist(gq[a0:a0 + 8192][None], Pp[None])[0].amin(1) > thr
+            qc = min(gq.shape[0], max(8192, 16_000_000 // max(Pp.shape[0], 1)))   # adaptive: fewer, bigger cdists
+            for a0 in range(0, gq.shape[0], qc):
+                far[a0:a0 + qc] = torch.cdist(gq[a0:a0 + qc][None], Pp[None])[0].amin(1) > thr
             far = far.view(res, res, res)
             kill = out_box | (far & (f > -0.5 * trunc))              # no-opinion zone -> force OUTSIDE
             f = torch.where(kill, torch.full_like(f, trunc), f)

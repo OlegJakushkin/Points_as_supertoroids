@@ -261,10 +261,10 @@ def main():
                 run += float(loss.detach()); nb += 1
                 if nb % CKPT_EVERY == 0: _atomic_save(_meta(ep, best), out_latest)   # mid-epoch resume point
             del clean, tc, Pn, pred, c_anchor, c_clean, seg, loss
-            if nb == 1 or nb % 25 == 0:
-                print(f"  ep{ep+1} {min(s+batch,len(tr))}/{len(tr)} step{nb} loss {run/max(nb,1):.4f} "
-                      f"| GPU {torch.cuda.max_memory_allocated()/1e9:.1f}GB | {time.time()-t0:.0f}s", flush=True)
-            torch.cuda.empty_cache()
+            if nb == 1 or nb % 25 == 0:                        # NB: no per-step empty_cache() -- it force-syncs
+                print(f"  ep{ep+1} {min(s+batch,len(tr))}/{len(tr)} step{nb} loss {run/max(nb,1):.4f} "  # and defeats the
+                      f"| GPU {torch.cuda.max_memory_allocated()/1e9:.1f}GB | {time.time()-t0:.0f}s", flush=True)  # caching allocator
+        torch.cuda.empty_cache()                              # once/epoch: free training cache before the 128^3 eval
         sdferr = clean_sdferr(val_idx)                        # cheap best-by-val scalar; the SUITE (render_suite.py) is the eval
         improved = sdferr < best; hist.append({"epoch": ep + 1, "train": run / max(nb, 1), "val_sdferr": sdferr})
         meta = _meta(ep + 1, sdferr)
